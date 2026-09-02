@@ -26,7 +26,12 @@ export default function AuthGate({
   const [isChecking, setIsChecking] =
     useState(true);
 
-  const [isAuthenticated, setIsAuthenticated] =
+  const [
+    isAuthenticated,
+    setIsAuthenticated,
+  ] = useState(false);
+
+  const [isSigningOut, setIsSigningOut] =
     useState(false);
 
   const isLoginPage =
@@ -114,7 +119,9 @@ export default function AuthGate({
             setIsAuthenticated(true);
             setIsChecking(false);
 
-            if (pathname === "/login") {
+            if (
+              pathname === "/login"
+            ) {
               router.replace("/");
             }
 
@@ -124,7 +131,9 @@ export default function AuthGate({
           setIsAuthenticated(false);
           setIsChecking(false);
 
-          if (pathname !== "/login") {
+          if (
+            pathname !== "/login"
+          ) {
             router.replace("/login");
           }
         }
@@ -139,6 +148,44 @@ export default function AuthGate({
     pathname,
     router,
   ]);
+
+  async function handleSignOut() {
+    if (isSigningOut) {
+      return;
+    }
+
+    setIsSigningOut(true);
+
+    try {
+      const { error } =
+        await supabase.auth.signOut();
+
+      if (error) {
+        window.alert(
+          `Sign out failed: ${error.message}`
+        );
+
+        setIsSigningOut(false);
+        return;
+      }
+
+      setIsAuthenticated(false);
+
+      router.replace("/login");
+      router.refresh();
+    } catch (error) {
+      console.error(
+        "Sign out failed:",
+        error
+      );
+
+      window.alert(
+        "Unable to sign out. Please try again."
+      );
+
+      setIsSigningOut(false);
+    }
+  }
 
   if (isLoginPage) {
     return <>{children}</>;
@@ -273,8 +320,7 @@ export default function AuthGate({
           }
 
           .authGuardCard h1 {
-            margin:
-              0 0 8px;
+            margin: 0 0 8px;
             font-size: 21px;
           }
 
@@ -295,5 +341,160 @@ export default function AuthGate({
     );
   }
 
-  return <>{children}</>;
+  return (
+    <>
+      <div className="protectedApp">
+        {children}
+      </div>
+
+      <button
+        className="globalSignOutButton"
+        type="button"
+        onClick={handleSignOut}
+        disabled={isSigningOut}
+        aria-label="Sign out of MOM Meeting Hub"
+      >
+        <span className="signOutIcon">
+          ↪
+        </span>
+
+        <span>
+          {isSigningOut
+            ? "Signing Out..."
+            : "Sign Out"}
+        </span>
+      </button>
+
+      <style jsx global>{`
+        .protectedApp {
+          min-height: 100vh;
+        }
+
+        .globalSignOutButton {
+          position: fixed;
+          z-index: 5000;
+          top: 20px;
+          right: 20px;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          gap: 9px;
+          min-height: 45px;
+          padding: 11px 17px;
+          color: #ffabb5;
+          background:
+            linear-gradient(
+              145deg,
+              rgba(
+                50,
+                20,
+                29,
+                0.96
+              ),
+              rgba(
+                32,
+                15,
+                24,
+                0.96
+              )
+            );
+          border: 1px solid
+            rgba(
+              255,
+              105,
+              125,
+              0.3
+            );
+          border-radius: 14px;
+          box-shadow:
+            0 14px 38px
+            rgba(
+              0,
+              0,
+              0,
+              0.42
+            );
+          backdrop-filter:
+            blur(18px);
+          font-size: 13px;
+          font-weight: 850;
+          cursor: pointer;
+          transition:
+            transform 0.2s ease,
+            background 0.2s ease,
+            border-color 0.2s ease,
+            color 0.2s ease;
+        }
+
+        .globalSignOutButton:hover:not(
+            :disabled
+          ) {
+          color: white;
+          background:
+            linear-gradient(
+              135deg,
+              #df3f58,
+              #a92942
+            );
+          border-color:
+            rgba(
+              255,
+              153,
+              167,
+              0.65
+            );
+          transform:
+            translateY(-2px);
+        }
+
+        .globalSignOutButton:active:not(
+            :disabled
+          ) {
+          transform:
+            translateY(0);
+        }
+
+        .globalSignOutButton:disabled {
+          opacity: 0.62;
+          cursor: not-allowed;
+        }
+
+        .signOutIcon {
+          display: grid;
+          place-items: center;
+          width: 24px;
+          height: 24px;
+          color: currentColor;
+          background:
+            rgba(
+              255,
+              255,
+              255,
+              0.07
+            );
+          border-radius: 8px;
+          font-size: 15px;
+          font-weight: 900;
+        }
+
+        @media (
+          max-width: 600px
+        ) {
+          .globalSignOutButton {
+            top: 12px;
+            right: 12px;
+            min-height: 41px;
+            padding:
+              9px 12px;
+            font-size: 12px;
+          }
+
+          .signOutIcon {
+            width: 22px;
+            height: 22px;
+          }
+        }
+      `}</style>
+    </>
+  );
 }
