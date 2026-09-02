@@ -3,6 +3,7 @@
 import {
   ReactNode,
   useEffect,
+  useRef,
   useState,
 } from "react";
 
@@ -17,11 +18,26 @@ type AuthGateProps = {
   children: ReactNode;
 };
 
+type UserRole =
+  | "owner"
+  | "editor"
+  | "viewer";
+
+type UserProfile = {
+  id: string;
+  full_name: string;
+  email: string;
+  role: UserRole;
+};
+
 export default function AuthGate({
   children,
 }: AuthGateProps) {
   const router = useRouter();
   const pathname = usePathname();
+
+  const menuRef =
+    useRef<HTMLDivElement | null>(null);
 
   const [isChecking, setIsChecking] =
     useState(true);
@@ -31,14 +47,54 @@ export default function AuthGate({
     setIsAuthenticated,
   ] = useState(false);
 
+  const [isMenuOpen, setIsMenuOpen] =
+    useState(false);
+
   const [isSigningOut, setIsSigningOut] =
     useState(false);
+
+  const [profile, setProfile] =
+    useState<UserProfile | null>(null);
 
   const isLoginPage =
     pathname === "/login";
 
+  const isOwner =
+    profile?.role === "owner";
+
   useEffect(() => {
     let isActive = true;
+
+    async function loadProfile(
+      userId: string
+    ) {
+      const { data, error } =
+        await supabase
+          .from("profiles")
+          .select(
+            "id, full_name, email, role"
+          )
+          .eq("id", userId)
+          .single();
+
+      if (!isActive) {
+        return;
+      }
+
+      if (error) {
+        console.error(
+          "Profile loading failed:",
+          error
+        );
+
+        setProfile(null);
+        return;
+      }
+
+      setProfile(
+        data as UserProfile
+      );
+    }
 
     async function checkSession() {
       try {
@@ -59,6 +115,7 @@ export default function AuthGate({
           );
 
           setIsAuthenticated(false);
+          setProfile(null);
           setIsChecking(false);
 
           if (!isLoginPage) {
@@ -68,8 +125,17 @@ export default function AuthGate({
           return;
         }
 
-        if (session) {
+        if (session?.user) {
           setIsAuthenticated(true);
+
+          await loadProfile(
+            session.user.id
+          );
+
+          if (!isActive) {
+            return;
+          }
+
           setIsChecking(false);
 
           if (isLoginPage) {
@@ -80,6 +146,7 @@ export default function AuthGate({
         }
 
         setIsAuthenticated(false);
+        setProfile(null);
         setIsChecking(false);
 
         if (!isLoginPage) {
@@ -96,6 +163,7 @@ export default function AuthGate({
         }
 
         setIsAuthenticated(false);
+        setProfile(null);
         setIsChecking(false);
 
         if (!isLoginPage) {
@@ -110,13 +178,22 @@ export default function AuthGate({
       data: { subscription },
     } =
       supabase.auth.onAuthStateChange(
-        (_event, session) => {
+        async (_event, session) => {
           if (!isActive) {
             return;
           }
 
-          if (session) {
+          if (session?.user) {
             setIsAuthenticated(true);
+
+            await loadProfile(
+              session.user.id
+            );
+
+            if (!isActive) {
+              return;
+            }
+
             setIsChecking(false);
 
             if (
@@ -129,7 +206,9 @@ export default function AuthGate({
           }
 
           setIsAuthenticated(false);
+          setProfile(null);
           setIsChecking(false);
+          setIsMenuOpen(false);
 
           if (
             pathname !== "/login"
@@ -149,12 +228,80 @@ export default function AuthGate({
     router,
   ]);
 
+  useEffect(() => {
+    function handleOutsideClick(
+      event: MouseEvent
+    ) {
+      if (
+        menuRef.current &&
+        !menuRef.current.contains(
+          event.target as Node
+        )
+      ) {
+        setIsMenuOpen(false);
+      }
+    }
+
+    function handleEscape(
+      event: KeyboardEvent
+    ) {
+      if (event.key === "Escape") {
+        setIsMenuOpen(false);
+      }
+    }
+
+    document.addEventListener(
+      "mousedown",
+      handleOutsideClick
+    );
+
+    document.addEventListener(
+      "keydown",
+      handleEscape
+    );
+
+    return () => {
+      document.removeEventListener(
+        "mousedown",
+        handleOutsideClick
+      );
+
+      document.removeEventListener(
+        "keydown",
+        handleEscape
+      );
+    };
+  }, []);
+
+  useEffect(() => {
+    setIsMenuOpen(false);
+  }, [pathname]);
+
+  function openDashboard() {
+    setIsMenuOpen(false);
+    router.push("/");
+  }
+
+  function openManageAccess() {
+    setIsMenuOpen(false);
+
+    if (!isOwner) {
+      window.alert(
+        "Only the Owner can manage team access."
+      );
+      return;
+    }
+
+    router.push("/manage-access");
+  }
+
   async function handleSignOut() {
     if (isSigningOut) {
       return;
     }
 
     setIsSigningOut(true);
+    setIsMenuOpen(false);
 
     try {
       const { error } =
@@ -170,6 +317,7 @@ export default function AuthGate({
       }
 
       setIsAuthenticated(false);
+      setProfile(null);
 
       router.replace("/login");
       router.refresh();
@@ -187,6 +335,17 @@ export default function AuthGate({
     }
   }
 
+  function getUserInitial() {
+    const value =
+      profile?.full_name?.trim() ||
+      profile?.email?.trim() ||
+      "User";
+
+    return value
+      .charAt(0)
+      .toUpperCase();
+  }
+
   if (isLoginPage) {
     return <>{children}</>;
   }
@@ -196,17 +355,15 @@ export default function AuthGate({
     !isAuthenticated
   ) {
     return (
-      <main className="authGuardPage">
-        <div className="authGuardCard">
-          <div className="authGuardLogo">
+      <main className="auth-loading-page">
+        <div className="auth-loading-card">
+          <div className="auth-loading-logo">
             M
           </div>
 
-          <div className="authGuardSpinner" />
+          <div className="auth-spinner" />
 
-          <h1>
-            MOM Meeting Hub
-          </h1>
+          <h1>MOM Meeting Hub</h1>
 
           <p>
             Checking secure access...
@@ -214,7 +371,7 @@ export default function AuthGate({
         </div>
 
         <style jsx>{`
-          .authGuardPage {
+          .auth-loading-page {
             display: grid;
             place-items: center;
             min-height: 100vh;
@@ -223,68 +380,37 @@ export default function AuthGate({
             background:
               radial-gradient(
                 circle at 10% 10%,
-                rgba(
-                  10,
-                  192,
-                  226,
-                  0.23
-                ),
+                rgba(10, 192, 226, 0.23),
                 transparent 30%
               ),
               radial-gradient(
                 circle at 90% 20%,
-                rgba(
-                  114,
-                  76,
-                  235,
-                  0.27
-                ),
+                rgba(114, 76, 235, 0.27),
                 transparent 32%
               ),
               #050b14;
           }
 
-          .authGuardCard {
-            width: min(
-              100%,
-              390px
-            );
+          .auth-loading-card {
+            width: min(100%, 390px);
             padding: 38px;
             text-align: center;
             background:
-              rgba(
-                10,
-                22,
-                37,
-                0.92
-              );
+              rgba(10, 22, 37, 0.92);
             border: 1px solid
-              rgba(
-                255,
-                255,
-                255,
-                0.11
-              );
+              rgba(255, 255, 255, 0.11);
             border-radius: 25px;
             box-shadow:
               0 28px 90px
-              rgba(
-                0,
-                0,
-                0,
-                0.55
-              );
-            backdrop-filter:
-              blur(20px);
+              rgba(0, 0, 0, 0.55);
           }
 
-          .authGuardLogo {
+          .auth-loading-logo {
             display: grid;
             place-items: center;
             width: 56px;
             height: 56px;
-            margin:
-              0 auto 21px;
+            margin: 0 auto 21px;
             color: white;
             background:
               linear-gradient(
@@ -297,43 +423,34 @@ export default function AuthGate({
             font-weight: 900;
           }
 
-          .authGuardSpinner {
+          .auth-spinner {
             width: 45px;
             height: 45px;
-            margin:
-              0 auto 20px;
+            margin: 0 auto 20px;
             border: 4px solid
-              rgba(
-                255,
-                255,
-                255,
-                0.12
-              );
-            border-top-color:
-              #168fff;
+              rgba(255, 255, 255, 0.12);
+            border-top-color: #168fff;
             border-radius: 50%;
             animation:
-              authGuardSpin
+              authSpin
               0.75s
               linear
               infinite;
           }
 
-          .authGuardCard h1 {
+          .auth-loading-card h1 {
             margin: 0 0 8px;
             font-size: 21px;
           }
 
-          .authGuardCard p {
+          .auth-loading-card p {
             margin: 0;
             color: #8499ad;
-            font-size: 14px;
           }
 
-          @keyframes authGuardSpin {
+          @keyframes authSpin {
             to {
-              transform:
-                rotate(360deg);
+              transform: rotate(360deg);
             }
           }
         `}</style>
@@ -342,159 +459,465 @@ export default function AuthGate({
   }
 
   return (
-    <>
-      <div className="protectedApp">
+    <div className="authenticated-app-shell">
+      <div className="protected-app">
         {children}
       </div>
 
-      <button
-        className="globalSignOutButton"
-        type="button"
-        onClick={handleSignOut}
-        disabled={isSigningOut}
-        aria-label="Sign out of MOM Meeting Hub"
+      <div
+        className="page-app-menu"
+        ref={menuRef}
       >
-        <span className="signOutIcon">
-          ↪
-        </span>
+        <button
+          className={`page-menu-button ${
+            isMenuOpen
+              ? "menu-open"
+              : ""
+          }`}
+          type="button"
+          onClick={() =>
+            setIsMenuOpen(
+              (currentValue) =>
+                !currentValue
+            )
+          }
+          aria-label="Open application menu"
+          aria-expanded={isMenuOpen}
+        >
+          <span />
+          <span />
+          <span />
+        </button>
 
-        <span>
-          {isSigningOut
-            ? "Signing Out..."
-            : "Sign Out"}
-        </span>
-      </button>
+        {isMenuOpen && (
+          <div className="page-menu-dropdown">
+            <div className="menu-profile">
+              <div className="menu-profile-avatar">
+                {getUserInitial()}
+              </div>
+
+              <div className="menu-profile-details">
+                <strong>
+                  {profile?.full_name ||
+                    "MOM User"}
+                </strong>
+
+                <small>
+                  {profile?.email}
+                </small>
+
+                <span
+                  className={`menu-role ${
+                    isOwner
+                      ? "owner-role"
+                      : ""
+                  }`}
+                >
+                  {profile?.role ||
+                    "viewer"}
+                </span>
+              </div>
+            </div>
+
+            <div className="menu-divider" />
+
+            {pathname !== "/" && (
+              <button
+                className="menu-option"
+                type="button"
+                onClick={openDashboard}
+              >
+                <span className="menu-option-icon">
+                  H
+                </span>
+
+                <span className="menu-option-text">
+                  <strong>
+                    Dashboard
+                  </strong>
+
+                  <small>
+                    Return to main dashboard
+                  </small>
+                </span>
+              </button>
+            )}
+
+            {isOwner && (
+              <button
+                className="menu-option"
+                type="button"
+                onClick={
+                  openManageAccess
+                }
+              >
+                <span className="menu-option-icon access-icon">
+                  A
+                </span>
+
+                <span className="menu-option-text">
+                  <strong>
+                    Manage Access
+                  </strong>
+
+                  <small>
+                    Manage team permissions
+                  </small>
+                </span>
+              </button>
+            )}
+
+            <div className="menu-divider" />
+
+            <button
+              className="menu-option sign-out-option"
+              type="button"
+              onClick={handleSignOut}
+              disabled={isSigningOut}
+            >
+              <span className="menu-option-icon sign-out-icon">
+                ↪
+              </span>
+
+              <span className="menu-option-text">
+                <strong>
+                  {isSigningOut
+                    ? "Signing Out..."
+                    : "Sign Out"}
+                </strong>
+
+                <small>
+                  End the current session
+                </small>
+              </span>
+            </button>
+          </div>
+        )}
+      </div>
 
       <style jsx global>{`
-        .protectedApp {
+        .authenticated-app-shell {
+          position: relative;
           min-height: 100vh;
         }
 
-        .globalSignOutButton {
-          position: fixed;
-          z-index: 5000;
-          top: 20px;
-          right: 20px;
-          display: inline-flex;
+        .protected-app {
+          min-height: 100vh;
+        }
+
+        /*
+          This menu uses absolute positioning.
+          It stays at the top-right of the page,
+          but scrolls away with the page.
+        */
+        .page-app-menu {
+          position: absolute;
+          z-index: 99999;
+          top: 16px;
+          right: 16px;
+          width: auto;
+          height: auto;
+        }
+
+        .page-menu-button {
+          position: relative;
+          display: flex;
           align-items: center;
           justify-content: center;
-          gap: 9px;
-          min-height: 45px;
-          padding: 11px 17px;
-          color: #ffabb5;
+          flex-direction: column;
+          gap: 5px;
+          width: 48px;
+          height: 48px;
+          margin: 0;
+          padding: 0;
+          color: #ffffff;
           background:
             linear-gradient(
               145deg,
-              rgba(
-                50,
-                20,
-                29,
-                0.96
-              ),
-              rgba(
-                32,
-                15,
-                24,
-                0.96
-              )
+              rgba(16, 35, 54, 0.98),
+              rgba(7, 17, 30, 0.98)
             );
           border: 1px solid
-            rgba(
-              255,
-              105,
-              125,
-              0.3
-            );
-          border-radius: 14px;
+            rgba(255, 255, 255, 0.16);
+          border-radius: 15px;
           box-shadow:
-            0 14px 38px
-            rgba(
-              0,
-              0,
-              0,
-              0.42
-            );
-          backdrop-filter:
-            blur(18px);
-          font-size: 13px;
-          font-weight: 850;
+            0 15px 45px
+            rgba(0, 0, 0, 0.5);
+          backdrop-filter: blur(20px);
           cursor: pointer;
           transition:
             transform 0.2s ease,
             background 0.2s ease,
-            border-color 0.2s ease,
-            color 0.2s ease;
+            border-color 0.2s ease;
         }
 
-        .globalSignOutButton:hover:not(
-            :disabled
-          ) {
+        .page-menu-button:hover,
+        .page-menu-button.menu-open {
+          background:
+            linear-gradient(
+              135deg,
+              #168fff,
+              #5969eb
+            );
+          border-color:
+            rgba(139, 211, 255, 0.62);
+          transform: translateY(-2px);
+        }
+
+        .page-menu-button span {
+          display: block;
+          width: 21px;
+          height: 2px;
+          background: currentColor;
+          border-radius: 10px;
+          transition:
+            transform 0.2s ease,
+            opacity 0.2s ease;
+        }
+
+        .page-menu-button.menu-open
+          span:nth-child(1) {
+          transform:
+            translateY(7px)
+            rotate(45deg);
+        }
+
+        .page-menu-button.menu-open
+          span:nth-child(2) {
+          opacity: 0;
+        }
+
+        .page-menu-button.menu-open
+          span:nth-child(3) {
+          transform:
+            translateY(-7px)
+            rotate(-45deg);
+        }
+
+        .page-menu-dropdown {
+          position: absolute;
+          z-index: 100000;
+          top: calc(100% + 10px);
+          right: 0;
+          width: 300px;
+          max-width: calc(
+            100vw - 32px
+          );
+          padding: 10px;
+          overflow: hidden;
+          background:
+            linear-gradient(
+              155deg,
+              rgba(18, 38, 57, 0.99),
+              rgba(8, 18, 31, 0.99)
+            );
+          border: 1px solid
+            rgba(255, 255, 255, 0.14);
+          border-radius: 20px;
+          box-shadow:
+            0 26px 75px
+            rgba(0, 0, 0, 0.68);
+          backdrop-filter: blur(24px);
+          transform-origin: top right;
+          animation:
+            openPageMenu 0.18s ease;
+        }
+
+        @keyframes openPageMenu {
+          from {
+            opacity: 0;
+            transform:
+              translateY(-8px)
+              scale(0.96);
+          }
+
+          to {
+            opacity: 1;
+            transform:
+              translateY(0)
+              scale(1);
+          }
+        }
+
+        .menu-profile {
+          display: flex;
+          align-items: flex-start;
+          gap: 11px;
+          padding: 11px;
+        }
+
+        .menu-profile-avatar {
+          display: grid;
+          place-items: center;
+          flex: 0 0 43px;
+          width: 43px;
+          height: 43px;
           color: white;
           background:
             linear-gradient(
               135deg,
-              #df3f58,
-              #a92942
+              #15bde2,
+              #6867ec
             );
-          border-color:
-            rgba(
-              255,
-              153,
-              167,
-              0.65
-            );
-          transform:
-            translateY(-2px);
-        }
-
-        .globalSignOutButton:active:not(
-            :disabled
-          ) {
-          transform:
-            translateY(0);
-        }
-
-        .globalSignOutButton:disabled {
-          opacity: 0.62;
-          cursor: not-allowed;
-        }
-
-        .signOutIcon {
-          display: grid;
-          place-items: center;
-          width: 24px;
-          height: 24px;
-          color: currentColor;
-          background:
-            rgba(
-              255,
-              255,
-              255,
-              0.07
-            );
-          border-radius: 8px;
-          font-size: 15px;
+          border-radius: 14px;
           font-weight: 900;
         }
 
-        @media (
-          max-width: 600px
-        ) {
-          .globalSignOutButton {
-            top: 12px;
-            right: 12px;
-            min-height: 41px;
-            padding:
-              9px 12px;
-            font-size: 12px;
+        .menu-profile-details {
+          min-width: 0;
+          flex: 1;
+        }
+
+        .menu-profile-details strong,
+        .menu-profile-details small {
+          display: block;
+          overflow-wrap: anywhere;
+        }
+
+        .menu-profile-details strong {
+          margin-bottom: 4px;
+          color: #edf7ff;
+          font-size: 13px;
+        }
+
+        .menu-profile-details small {
+          color: #7e94a8;
+          font-size: 10px;
+        }
+
+        .menu-role {
+          display: inline-flex;
+          margin-top: 8px;
+          padding: 4px 8px;
+          color: #69c5ff;
+          background:
+            rgba(22, 143, 255, 0.11);
+          border-radius: 999px;
+          font-size: 9px;
+          font-weight: 900;
+          letter-spacing: 0.8px;
+          text-transform: uppercase;
+        }
+
+        .menu-role.owner-role {
+          color: #64e7aa;
+          background:
+            rgba(72, 222, 157, 0.1);
+        }
+
+        .menu-divider {
+          height: 1px;
+          margin: 6px 5px;
+          background:
+            rgba(255, 255, 255, 0.08);
+        }
+
+        .menu-option {
+          display: flex;
+          align-items: center;
+          gap: 11px;
+          width: 100%;
+          padding: 11px;
+          color: #dce9f4;
+          background: transparent;
+          border: none;
+          border-radius: 13px;
+          text-align: left;
+          cursor: pointer;
+          transition:
+            color 0.17s ease,
+            background 0.17s ease;
+        }
+
+        .menu-option:hover {
+          color: white;
+          background:
+            rgba(22, 143, 255, 0.14);
+        }
+
+        .menu-option:disabled {
+          opacity: 0.58;
+          cursor: not-allowed;
+        }
+
+        .menu-option-icon {
+          display: grid;
+          place-items: center;
+          flex: 0 0 35px;
+          width: 35px;
+          height: 35px;
+          color: #78d9ff;
+          background:
+            rgba(22, 143, 255, 0.11);
+          border-radius: 11px;
+          font-size: 13px;
+          font-weight: 900;
+        }
+
+        .menu-option-icon.access-icon {
+          color: #a78bff;
+          background:
+            rgba(131, 96, 237, 0.12);
+        }
+
+        .menu-option-text {
+          min-width: 0;
+          flex: 1;
+        }
+
+        .menu-option-text strong,
+        .menu-option-text small {
+          display: block;
+        }
+
+        .menu-option-text strong {
+          margin-bottom: 3px;
+          color: inherit;
+          font-size: 13px;
+        }
+
+        .menu-option-text small {
+          color: #748a9e;
+          font-size: 10px;
+        }
+
+        .sign-out-option {
+          color: #ff9ca9;
+        }
+
+        .sign-out-option:hover {
+          color: white;
+          background:
+            rgba(224, 57, 81, 0.72);
+        }
+
+        .sign-out-icon {
+          color: #ff9ca9;
+          background:
+            rgba(224, 57, 81, 0.1);
+        }
+
+        @media (max-width: 600px) {
+          .page-app-menu {
+            top: 10px;
+            right: 10px;
           }
 
-          .signOutIcon {
-            width: 22px;
-            height: 22px;
+          .page-menu-button {
+            width: 44px;
+            height: 44px;
+            border-radius: 13px;
+          }
+
+          .page-menu-dropdown {
+            top: calc(100% + 8px);
+            width: min(
+              290px,
+              calc(100vw - 20px)
+            );
           }
         }
       `}</style>
-    </>
+    </div>
   );
 }
