@@ -5,7 +5,12 @@ import { createClient } from "@supabase/supabase-js";
 
 type PointStatus = "Open" | "Completed";
 type ActiveTab = "information" | "action";
-type UserRole = "owner" | "viewer";
+type UserRole = "owner" | "editor" | "viewer";
+
+type UserPermissions = {
+  canDeleteMeetings: boolean;
+  canDeleteAllPoints: boolean;
+};
 
 type MeetingPoint = {
   id: number;
@@ -183,10 +188,15 @@ export default function Page() {
 
   const [dataLoaded, setDataLoaded] = useState(false);
   const [role, setRole] = useState<UserRole>("viewer");
+  const [permissions, setPermissions] = useState<UserPermissions>({
+    canDeleteMeetings: false,
+    canDeleteAllPoints: false,
+  });
   const [syncStatus, setSyncStatus] = useState("LOADING");
   const skipNextSave = useRef(false);
-  const canModify = role === "owner" || role === "viewer";
-  const canDelete = role === "owner";
+  const canModify = role === "owner" || role === "editor" || role === "viewer";
+  const canDeleteMeeting = role === "owner" || permissions.canDeleteMeetings;
+  const canDeletePoint = role === "owner" || permissions.canDeleteAllPoints;
 
   function normalizeMeetings(value: unknown): Meeting[] {
     if (!Array.isArray(value) || value.length === 0) {
@@ -222,12 +232,21 @@ export default function Page() {
 
       const { data: profile } = await supabase
         .from("profiles")
-        .select("role")
+        .select("role, can_delete_meetings, can_delete_all_points")
         .eq("id", user.id)
         .maybeSingle();
 
       const loadedRole: UserRole =
-        profile?.role === "owner" ? "owner" : "viewer";
+        profile?.role === "owner"
+          ? "owner"
+          : profile?.role === "editor"
+            ? "editor"
+            : "viewer";
+
+      setPermissions({
+        canDeleteMeetings: Boolean(profile?.can_delete_meetings),
+        canDeleteAllPoints: Boolean(profile?.can_delete_all_points),
+      });
 
       const { data, error } = await supabase
         .from("mom_shared_state")
@@ -787,58 +806,36 @@ export default function Page() {
   function deleteMeeting(
     meetingId: number
   ) {
-    if (!canDelete) {
-      window.alert("Viewer access is read-only. Delete is not allowed.");
-      closeEveryMenu();
-      return;
-    }
-    if (meetings.length === 1) {
-      window.alert(
-        "The last TBM cannot be deleted."
-      );
+    if (!canDeleteMeeting) {
+      window.alert("You do not have permission to delete meetings.");
       closeEveryMenu();
       return;
     }
 
-    const meetingToDelete =
-      meetings.find(
-        (meeting) =>
-          meeting.id === meetingId
-      );
+    const meetingToDelete = meetings.find(
+      (meeting) => meeting.id === meetingId
+    );
 
-    const shouldDelete =
-      window.confirm(
-        `Delete ${
-          meetingToDelete?.name ||
-          "this TBM"
-        } and all its points?`
-      );
+    const shouldDelete = window.confirm(
+      `Delete ${meetingToDelete?.name || "this TBM"} and all its points?`
+    );
 
     if (!shouldDelete) {
       closeEveryMenu();
       return;
     }
 
-    const remainingMeetings =
-      meetings.filter(
-        (meeting) =>
-          meeting.id !== meetingId
-      );
-
-    setMeetings(
-      remainingMeetings
+    const remainingMeetings = meetings.filter(
+      (meeting) => meeting.id !== meetingId
     );
 
-    if (
-      selectedMeetingId ===
-      meetingId
-    ) {
+    setMeetings(remainingMeetings);
+
+    if (selectedMeetingId === meetingId) {
       setSelectedMeetingId(
-        remainingMeetings[0].id
+        remainingMeetings.length > 0 ? remainingMeetings[0].id : 0
       );
-      setActiveTab(
-        "information"
-      );
+      setActiveTab("information");
       setMemberFilter("");
     }
 
@@ -1191,8 +1188,8 @@ export default function Page() {
   function deletePoint(
     pointId: number
   ) {
-    if (!canDelete) {
-      window.alert("Viewer access is read-only. Delete is not allowed.");
+    if (!canDeletePoint) {
+      window.alert("You do not have permission to delete points.");
       closeEveryMenu();
       return;
     }
@@ -2486,23 +2483,21 @@ export default function Page() {
 
                             <div className="menu-separator" />
 
-                            {canDelete && (
-                              <button
-                                className="menu-option delete"
-                                onClick={() =>
-                                  deleteMeeting(
-                                    meeting.id
-                                  )
-                                }
-                              >
-                                <span className="menu-icon">
-                                  🗑
-                                </span>
-                                <span>
-                                  Delete meeting
-                                </span>
-                              </button>
-                            )}
+                            <button
+                              className="menu-option delete"
+                              onClick={() =>
+                                deleteMeeting(
+                                  meeting.id
+                                )
+                              }
+                            >
+                              <span className="menu-icon">
+                                🗑
+                              </span>
+                              <span>
+                                Delete meeting
+                              </span>
+                            </button>
                           </div>
                         )}
                       </div>
@@ -2973,23 +2968,21 @@ export default function Page() {
 
                               <div className="menu-separator" />
 
-                              {canDelete && (
-                                <button
-                                  className="menu-option delete"
-                                  onClick={() =>
-                                    deletePoint(
-                                      meetingPoint.id
-                                    )
-                                  }
-                                >
-                                  <span className="menu-icon">
-                                    🗑
-                                  </span>
-                                  <span>
-                                    Delete point
-                                  </span>
-                                </button>
-                              )}
+                              <button
+                                className="menu-option delete"
+                                onClick={() =>
+                                  deletePoint(
+                                    meetingPoint.id
+                                  )
+                                }
+                              >
+                                <span className="menu-icon">
+                                  🗑
+                                </span>
+                                <span>
+                                  Delete point
+                                </span>
+                              </button>
                             </div>
                           )}
                         </div>
