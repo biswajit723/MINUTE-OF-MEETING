@@ -185,7 +185,7 @@ export default function Page() {
   const [role, setRole] = useState<UserRole>("viewer");
   const [syncStatus, setSyncStatus] = useState("LOADING");
   const skipNextSave = useRef(false);
-  const canModify = role === "owner";
+  const canModify = role === "owner" || role === "viewer";
   const canDelete = role === "owner";
 
   function normalizeMeetings(value: unknown): Meeting[] {
@@ -324,9 +324,9 @@ export default function Page() {
     return () => window.clearTimeout(timer);
   }, [meetings, dataLoaded, canModify]);
 
-  function requireOwner() {
+  function requireModifyPermission() {
     if (canModify) return true;
-    window.alert("Viewer access is read-only.");
+    window.alert("You do not have permission to modify this data.");
     closeEveryMenu();
     return false;
   }
@@ -601,7 +601,7 @@ export default function Page() {
   }
 
   function openNewMeetingModal() {
-    if (!requireOwner()) return;
+    if (!requireModifyPermission()) return;
     const today =
       new Date()
         .toISOString()
@@ -620,7 +620,7 @@ export default function Page() {
   }
 
   function createNewMeeting() {
-    if (!requireOwner()) return;
+    if (!requireModifyPermission()) return;
     if (!newMeetingDate) {
       window.alert(
         "Please select a meeting date."
@@ -695,7 +695,7 @@ export default function Page() {
   function openEditMeetingModal(
     meeting: Meeting
   ) {
-    if (!requireOwner()) return;
+    if (!requireModifyPermission()) return;
     setEditMeetingId(meeting.id);
     setEditMeetingName(
       meeting.name
@@ -715,7 +715,7 @@ export default function Page() {
   }
 
   function saveEditedMeeting() {
-    if (!requireOwner()) return;
+    if (!requireModifyPermission()) return;
     if (editMeetingId === null) {
       return;
     }
@@ -761,7 +761,7 @@ export default function Page() {
   function togglePinMeeting(
     meetingId: number
   ) {
-    if (!requireOwner()) return;
+    if (!requireModifyPermission()) return;
     setMeetings(
       (currentMeetings) =>
         currentMeetings.map(
@@ -846,7 +846,7 @@ export default function Page() {
   }
 
   function openPointModal() {
-    if (!requireOwner()) return;
+    if (!requireModifyPermission()) return;
     setMemberName(
       selectedMemberName || ""
     );
@@ -862,7 +862,7 @@ export default function Page() {
   }
 
   function addNewPoint() {
-    if (!requireOwner()) return;
+    if (!requireModifyPermission()) return;
     if (!memberName.trim()) {
       window.alert(
         "Please enter the member name."
@@ -978,7 +978,7 @@ export default function Page() {
     pointId: number,
     currentText: string
   ) {
-    if (!requireOwner()) return;
+    if (!requireModifyPermission()) return;
     setEditingPointId(pointId);
     setEditPointText(currentText);
     closeEveryMenu();
@@ -992,7 +992,7 @@ export default function Page() {
   function saveEditedPoint(
     pointId: number
   ) {
-    if (!requireOwner()) return;
+    if (!requireModifyPermission()) return;
     if (!editPointText.trim()) {
       window.alert(
         "Point details cannot be empty."
@@ -1072,7 +1072,7 @@ export default function Page() {
   function togglePinPoint(
     pointId: number
   ) {
-    if (!requireOwner()) return;
+    if (!requireModifyPermission()) return;
     if (
       activeTab ===
       "information"
@@ -1144,7 +1144,7 @@ export default function Page() {
   function changeActionStatus(
     pointId: number
   ) {
-    if (!requireOwner()) return;
+    if (!requireModifyPermission()) return;
     setMeetings(
       (currentMeetings) =>
         currentMeetings.map(
@@ -2486,21 +2486,23 @@ export default function Page() {
 
                             <div className="menu-separator" />
 
-                            <button
-                              className="menu-option delete"
-                              onClick={() =>
-                                deleteMeeting(
-                                  meeting.id
-                                )
-                              }
-                            >
-                              <span className="menu-icon">
-                                🗑
-                              </span>
-                              <span>
-                                Delete meeting
-                              </span>
-                            </button>
+                            {canDelete && (
+                              <button
+                                className="menu-option delete"
+                                onClick={() =>
+                                  deleteMeeting(
+                                    meeting.id
+                                  )
+                                }
+                              >
+                                <span className="menu-icon">
+                                  🗑
+                                </span>
+                                <span>
+                                  Delete meeting
+                                </span>
+                              </button>
+                            )}
                           </div>
                         )}
                       </div>
@@ -2971,21 +2973,23 @@ export default function Page() {
 
                               <div className="menu-separator" />
 
-                              <button
-                                className="menu-option delete"
-                                onClick={() =>
-                                  deletePoint(
-                                    meetingPoint.id
-                                  )
-                                }
-                              >
-                                <span className="menu-icon">
-                                  🗑
-                                </span>
-                                <span>
-                                  Delete point
-                                </span>
-                              </button>
+                              {canDelete && (
+                                <button
+                                  className="menu-option delete"
+                                  onClick={() =>
+                                    deletePoint(
+                                      meetingPoint.id
+                                    )
+                                  }
+                                >
+                                  <span className="menu-icon">
+                                    🗑
+                                  </span>
+                                  <span>
+                                    Delete point
+                                  </span>
+                                </button>
+                              )}
                             </div>
                           )}
                         </div>
