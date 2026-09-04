@@ -1,9 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { createClient } from "@supabase/supabase-js";
 
 type PointStatus = "Open" | "Completed";
 type ActiveTab = "information" | "action";
+type UserRole = "owner" | "viewer";
 
 type MeetingPoint = {
   id: number;
@@ -23,6 +25,14 @@ type Meeting = {
   information: MeetingPoint[];
   action: MeetingPoint[];
 };
+
+
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+);
+
+const SHARED_STATE_ID = "main";
 
 const initialMeetings: Meeting[] = [
   {
@@ -171,67 +181,155 @@ export default function Page() {
   const [editPointText, setEditPointText] =
     useState("");
 
-  const [dataLoaded, setDataLoaded] =
-    useState(false);
+  const [dataLoaded, setDataLoaded] = useState(false);
+  const [role, setRole] = useState<UserRole>("viewer");
+  const [syncStatus, setSyncStatus] = useState("LOADING");
+  const skipNextSave = useRef(false);
+  const canModify = role === "owner";
+  const canDelete = role === "owner";
+
+  function normalizeMeetings(value: unknown): Meeting[] {
+    if (!Array.isArray(value) || value.length === 0) {
+      return initialMeetings;
+    }
+
+    return (value as Meeting[]).map((meeting, index) => ({
+      ...meeting,
+      serialNumber: meeting.serialNumber || index + 1,
+      pinned: Boolean(meeting.pinned),
+      information: meeting.information || [],
+      action: meeting.action || [],
+    }));
+  }
 
   useEffect(() => {
-    try {
-      const savedData =
-        window.localStorage.getItem(
-          "mom-meetings-v2"
-        );
+    let active = true;
 
-      if (savedData) {
-        const parsedData =
-          JSON.parse(savedData) as Meeting[];
+    async function loadSharedData() {
+      setSyncStatus("LOADING");
 
-        if (
-          Array.isArray(parsedData) &&
-          parsedData.length > 0
-        ) {
-          const correctedMeetings =
-            parsedData.map(
-              (meeting, index) => ({
-                ...meeting,
-                serialNumber:
-                  meeting.serialNumber ||
-                  index + 1,
-                pinned: Boolean(
-                  meeting.pinned
-                ),
-                information:
-                  meeting.information || [],
-                action:
-                  meeting.action || [],
-              })
-            );
+      const { data: userData } = await supabase.auth.getUser();
+      const user = userData.user;
 
-          setMeetings(correctedMeetings);
-          setSelectedMeetingId(
-            correctedMeetings[0].id
-          );
+      if (!user) {
+        if (active) {
+          setRole("viewer");
+          setDataLoaded(true);
+          setSyncStatus("SIGN IN REQUIRED");
         }
+        return;
       }
-    } catch (error) {
-      console.log(
-        "Saved meeting data could not be loaded.",
-        error
-      );
-    } finally {
+
+      const { data: profile } = await supabase
+        .from("profiles")
+        .select("role")
+        .eq("id", user.id)
+        .maybeSingle();
+
+      const loadedRole: UserRole =
+        profile?.role === "owner" ? "owner" : "viewer";
+
+      const { data, error } = await supabase
+        .from("mom_shared_state")
+        .select("data")
+        .eq("id", SHARED_STATE_ID)
+        .maybeSingle();
+
+      if (!active) return;
+
+      setRole(loadedRole);
+
+      if (error) {
+        console.error(error);
+        setSyncStatus("LOAD FAILED");
+        setDataLoaded(true);
+        return;
+      }
+
+      const loadedMeetings = normalizeMeetings(data?.data);
+      skipNextSave.current = Boolean(data?.data);
+      setMeetings(loadedMeetings);
+      setSelectedMeetingId(loadedMeetings[0].id);
       setDataLoaded(true);
+      setSyncStatus("SYNCED");
     }
+
+    loadSharedData();
+
+    const channel = supabase
+      .channel("mom-shared-state-live")
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "mom_shared_state",
+          filter: `id=eq.${SHARED_STATE_ID}`,
+        },
+        (payload) => {
+          const row = payload.new as { data?: unknown };
+          if (!row?.data) return;
+
+          const incoming = normalizeMeetings(row.data);
+          skipNextSave.current = true;
+          setMeetings(incoming);
+          setSelectedMeetingId((currentId) =>
+            incoming.some((meeting) => meeting.id === currentId)
+              ? currentId
+              : incoming[0].id
+          );
+          setSyncStatus("SYNCED");
+        }
+      )
+      .subscribe();
+
+    return () => {
+      active = false;
+      supabase.removeChannel(channel);
+    };
   }, []);
 
   useEffect(() => {
-    if (!dataLoaded) {
+    if (!dataLoaded || !canModify) return;
+
+    if (skipNextSave.current) {
+      skipNextSave.current = false;
       return;
     }
 
-    window.localStorage.setItem(
-      "mom-meetings-v2",
-      JSON.stringify(meetings)
-    );
-  }, [meetings, dataLoaded]);
+    const timer = window.setTimeout(async () => {
+      setSyncStatus("SAVING");
+
+      const { error } = await supabase
+        .from("mom_shared_state")
+        .upsert(
+          {
+            id: SHARED_STATE_ID,
+            data: meetings,
+            updated_at: new Date().toISOString(),
+          },
+          { onConflict: "id" }
+        );
+
+      if (error) {
+        console.error(error);
+        setSyncStatus("SAVE FAILED");
+        window.alert(`Save failed: ${error.message}`);
+        return;
+      }
+
+      setSyncStatus("SYNCED");
+    }, 350);
+
+    return () => window.clearTimeout(timer);
+  }, [meetings, dataLoaded, canModify]);
+
+  function requireOwner() {
+    if (canModify) return true;
+    window.alert("Viewer access is read-only.");
+    closeEveryMenu();
+    return false;
+  }
 
   const selectedMeeting =
     meetings.find(
@@ -503,6 +601,7 @@ export default function Page() {
   }
 
   function openNewMeetingModal() {
+    if (!requireOwner()) return;
     const today =
       new Date()
         .toISOString()
@@ -521,6 +620,7 @@ export default function Page() {
   }
 
   function createNewMeeting() {
+    if (!requireOwner()) return;
     if (!newMeetingDate) {
       window.alert(
         "Please select a meeting date."
@@ -595,6 +695,7 @@ export default function Page() {
   function openEditMeetingModal(
     meeting: Meeting
   ) {
+    if (!requireOwner()) return;
     setEditMeetingId(meeting.id);
     setEditMeetingName(
       meeting.name
@@ -614,6 +715,7 @@ export default function Page() {
   }
 
   function saveEditedMeeting() {
+    if (!requireOwner()) return;
     if (editMeetingId === null) {
       return;
     }
@@ -659,6 +761,7 @@ export default function Page() {
   function togglePinMeeting(
     meetingId: number
   ) {
+    if (!requireOwner()) return;
     setMeetings(
       (currentMeetings) =>
         currentMeetings.map(
@@ -684,6 +787,11 @@ export default function Page() {
   function deleteMeeting(
     meetingId: number
   ) {
+    if (!canDelete) {
+      window.alert("Viewer access is read-only. Delete is not allowed.");
+      closeEveryMenu();
+      return;
+    }
     if (meetings.length === 1) {
       window.alert(
         "The last TBM cannot be deleted."
@@ -738,6 +846,7 @@ export default function Page() {
   }
 
   function openPointModal() {
+    if (!requireOwner()) return;
     setMemberName(
       selectedMemberName || ""
     );
@@ -753,6 +862,7 @@ export default function Page() {
   }
 
   function addNewPoint() {
+    if (!requireOwner()) return;
     if (!memberName.trim()) {
       window.alert(
         "Please enter the member name."
@@ -868,6 +978,7 @@ export default function Page() {
     pointId: number,
     currentText: string
   ) {
+    if (!requireOwner()) return;
     setEditingPointId(pointId);
     setEditPointText(currentText);
     closeEveryMenu();
@@ -881,6 +992,7 @@ export default function Page() {
   function saveEditedPoint(
     pointId: number
   ) {
+    if (!requireOwner()) return;
     if (!editPointText.trim()) {
       window.alert(
         "Point details cannot be empty."
@@ -960,6 +1072,7 @@ export default function Page() {
   function togglePinPoint(
     pointId: number
   ) {
+    if (!requireOwner()) return;
     if (
       activeTab ===
       "information"
@@ -1031,6 +1144,7 @@ export default function Page() {
   function changeActionStatus(
     pointId: number
   ) {
+    if (!requireOwner()) return;
     setMeetings(
       (currentMeetings) =>
         currentMeetings.map(
@@ -1077,6 +1191,11 @@ export default function Page() {
   function deletePoint(
     pointId: number
   ) {
+    if (!canDelete) {
+      window.alert("Viewer access is read-only. Delete is not allowed.");
+      closeEveryMenu();
+      return;
+    }
     const shouldDelete =
       window.confirm(
         "Do you want to permanently delete this point?"
@@ -2200,14 +2319,14 @@ export default function Page() {
               </p>
             </div>
 
-            <button
-              className="primary-button"
-              onClick={
-                openNewMeetingModal
-              }
-            >
-              + Create New TBM
-            </button>
+            {canModify && (
+              <button
+                className="primary-button"
+                onClick={openNewMeetingModal}
+              >
+                + Create New TBM
+              </button>
+            )}
           </header>
 
           <section className="stats-grid">
@@ -2229,8 +2348,9 @@ export default function Page() {
             <div className="stat-card">
               <p>DATA STATUS</p>
               <h2 className="saved-text">
-                SAVED
+                {syncStatus}
               </h2>
+              <small>{role.toUpperCase()}</small>
             </div>
           </section>
 
@@ -2302,6 +2422,7 @@ export default function Page() {
                         </small>
                       </button>
 
+                      {canModify && (
                       <div className="menu-wrapper">
                         <button
                           className={`three-dot-button ${
@@ -2383,6 +2504,7 @@ export default function Page() {
                           </div>
                         )}
                       </div>
+                      )}
                     </div>
                   )
                 )}
@@ -2404,12 +2526,14 @@ export default function Page() {
                   </p>
                 </div>
 
-                <button
-                  className="add-point-button"
-                  onClick={openPointModal}
-                >
-                  + Add Point
-                </button>
+                {canModify && (
+                  <button
+                    className="add-point-button"
+                    onClick={openPointModal}
+                  >
+                    + Add Point
+                  </button>
+                )}
               </div>
 
               <section className="member-filter">
@@ -2767,6 +2891,7 @@ export default function Page() {
                                       ? "completed"
                                       : "open"
                                   }`}
+                                  disabled={!canModify}
                                   onClick={() =>
                                     changeActionStatus(
                                       meetingPoint.id
@@ -2781,6 +2906,7 @@ export default function Page() {
                           </div>
                         </div>
 
+                        {canModify && (
                         <div className="menu-wrapper">
                           <button
                             className={`three-dot-button ${
@@ -2863,6 +2989,7 @@ export default function Page() {
                             </div>
                           )}
                         </div>
+                        )}
                       </article>
                     )
                   )
