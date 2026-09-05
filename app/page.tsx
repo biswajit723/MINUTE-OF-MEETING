@@ -111,7 +111,6 @@ function normalizeMeetings(value: unknown): Meeting[] {
     ...meeting,
     serialNumber: meeting.serialNumber || index + 1,
     information: meeting.information || [],
-    action: meeting.action || [],
     attendance: meeting.attendance || [],
     action: (meeting.action || []).map((point) => ({
       ...point,
