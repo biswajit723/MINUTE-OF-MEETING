@@ -4,13 +4,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createClient } from "@supabase/supabase-js";
 
 type PointStatus = "Open" | "Completed";
-type ActiveTab = "information" | "action";
+type ActiveTab = "information" | "action" | "attendance";
 type UserRole = "owner" | "editor" | "viewer";
-
-type UserPermissions = {
-  canDeleteMeetings: boolean;
-  canDeleteAllPoints: boolean;
-};
+type AttendanceStatus = "Present" | "Absent";
 
 type MeetingPoint = {
   id: number;
@@ -19,6 +15,14 @@ type MeetingPoint = {
   addedAt: string;
   status?: PointStatus;
   pinned?: boolean;
+  responsiblePerson?: string;
+  dueDate?: string;
+};
+
+type Attendance = {
+  id: number;
+  name: string;
+  status: AttendanceStatus;
 };
 
 type Meeting = {
@@ -29,12 +33,24 @@ type Meeting = {
   pinned?: boolean;
   information: MeetingPoint[];
   action: MeetingPoint[];
+  attendance: Attendance[];
 };
 
+type UserPermissions = {
+  canDeleteMeetings: boolean;
+  canDeleteAllPoints: boolean;
+};
+
+type TeamProfile = {
+  id: string;
+  full_name: string | null;
+  email: string | null;
+};
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY!
 );
 
 const SHARED_STATE_ID = "main";
@@ -44,209 +60,140 @@ const initialMeetings: Meeting[] = [
     id: 1,
     serialNumber: 1,
     name: "TBM-1",
-    date: "2026-09-02",
+    date: new Date().toISOString().slice(0, 10),
     pinned: false,
-    information: [
-      {
-        id: 101,
-        text: "Weekly safety briefing completed for all team members.",
-        addedBy: "Biswajit Ghosh",
-        addedAt: "10:15 AM",
-        pinned: false,
-      },
-      {
-        id: 102,
-        text: "All team members must follow the updated site safety procedure.",
-        addedBy: "Team Member",
-        addedAt: "10:20 AM",
-        pinned: false,
-      },
-    ],
-    action: [
-      {
-        id: 103,
-        text: "Confirm pending material availability before the next meeting.",
-        addedBy: "Team Member",
-        addedAt: "10:26 AM",
-        status: "Open",
-        pinned: false,
-      },
-    ],
+    information: [],
+    action: [],
+    attendance: [],
   },
 ];
-
-function formatDate(date: string) {
-  if (!date) {
-    return "";
-  }
-
-  return new Date(`${date}T00:00:00`).toLocaleDateString(
-    "en-GB",
-    {
-      day: "2-digit",
-      month: "long",
-      year: "numeric",
-    }
-  );
-}
 
 function normalizeText(value: string) {
   return value.trim().toLowerCase();
 }
 
-function getInitials(name: string) {
-  const words = name
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean);
+function formatDate(date: string) {
+  if (!date) return "Not set";
+  return new Date(`${date}T00:00:00`).toLocaleDateString("en-GB", {
+    day: "2-digit",
+    month: "long",
+    year: "numeric",
+  });
+}
 
-  if (words.length === 0) {
-    return "TM";
-  }
+function dueState(point: MeetingPoint) {
+  if (point.status === "Completed" || !point.dueDate) return "normal";
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const due = new Date(`${point.dueDate}T00:00:00`);
+  const days = Math.ceil((due.getTime() - today.getTime()) / 86400000);
+  if (days < 0) return "overdue";
+  if (days === 0) return "today";
+  if (days <= 3) return "soon";
+  return "normal";
+}
 
-  if (words.length === 1) {
-    return words[0].slice(0, 2).toUpperCase();
-  }
-
-  return `${words[0][0]}${words[1][0]}`.toUpperCase();
+function normalizeMeetings(value: unknown): Meeting[] {
+  if (!Array.isArray(value) || value.length === 0) return initialMeetings;
+  return (value as Meeting[]).map((meeting, index) => ({
+    ...meeting,
+    serialNumber: meeting.serialNumber || index + 1,
+    information: meeting.information || [],
+    action: meeting.action || [],
+    attendance: meeting.attendance || [],
+  }));
 }
 
 export default function Page() {
-  const [meetings, setMeetings] =
-    useState<Meeting[]>(initialMeetings);
-
-  const [selectedMeetingId, setSelectedMeetingId] =
-    useState<number>(1);
-
-  const [activeTab, setActiveTab] =
-    useState<ActiveTab>("information");
-
-  const [searchText, setSearchText] =
-    useState("");
-
-  const [memberFilter, setMemberFilter] =
-    useState("");
-
-  const [
-    showMemberSuggestions,
-    setShowMemberSuggestions,
-  ] = useState(false);
-
-  const [
-    showNewMeetingModal,
-    setShowNewMeetingModal,
-  ] = useState(false);
-
-  const [
-    showPointModal,
-    setShowPointModal,
-  ] = useState(false);
-
-  const [
-    showEditMeetingModal,
-    setShowEditMeetingModal,
-  ] = useState(false);
-
-  const [newMeetingName, setNewMeetingName] =
-    useState("");
-
-  const [newMeetingDate, setNewMeetingDate] =
-    useState("");
-
-  const [editMeetingId, setEditMeetingId] =
-    useState<number | null>(null);
-
-  const [editMeetingName, setEditMeetingName] =
-    useState("");
-
-  const [editMeetingDate, setEditMeetingDate] =
-    useState("");
-
-  const [memberName, setMemberName] =
-    useState("");
-
-  const [pointText, setPointText] =
-    useState("");
-
-  const [
-    openPointMenuId,
-    setOpenPointMenuId,
-  ] = useState<number | null>(null);
-
-  const [
-    openMeetingMenuId,
-    setOpenMeetingMenuId,
-  ] = useState<number | null>(null);
-
-  const [
-    editingPointId,
-    setEditingPointId,
-  ] = useState<number | null>(null);
-
-  const [editPointText, setEditPointText] =
-    useState("");
-
-  const [dataLoaded, setDataLoaded] = useState(false);
+  const [meetings, setMeetings] = useState<Meeting[]>(initialMeetings);
+  const [selectedMeetingId, setSelectedMeetingId] = useState(1);
+  const [activeTab, setActiveTab] = useState<ActiveTab>("information");
+  const [search, setSearch] = useState("");
+  const [memberFilter, setMemberFilter] = useState("");
+  const [responsibleFilter, setResponsibleFilter] = useState("");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [dueFilter, setDueFilter] = useState("all");
   const [role, setRole] = useState<UserRole>("viewer");
   const [permissions, setPermissions] = useState<UserPermissions>({
     canDeleteMeetings: false,
     canDeleteAllPoints: false,
   });
   const [syncStatus, setSyncStatus] = useState("LOADING");
+  const [loaded, setLoaded] = useState(false);
   const skipNextSave = useRef(false);
+
+  const [meetingModal, setMeetingModal] = useState(false);
+  const [editMeetingId, setEditMeetingId] = useState<number | null>(null);
+  const [meetingName, setMeetingName] = useState("");
+  const [meetingDate, setMeetingDate] = useState("");
+
+  const [pointModal, setPointModal] = useState(false);
+  const [editingPointId, setEditingPointId] = useState<number | null>(null);
+  const [pointText, setPointText] = useState("");
+  const [addedBy, setAddedBy] = useState("");
+  const [responsiblePerson, setResponsiblePerson] = useState("");
+  const [dueDate, setDueDate] = useState("");
+
+  const [attendanceProfileId, setAttendanceProfileId] = useState("");
+  const [teamProfiles, setTeamProfiles] = useState<TeamProfile[]>([]);
+  const [currentUserName, setCurrentUserName] = useState("");
+  const [openMeetingMenuId, setOpenMeetingMenuId] = useState<number | null>(null);
+  const [openPointMenuId, setOpenPointMenuId] = useState<number | null>(null);
+  const [notificationPermission, setNotificationPermission] =
+    useState<NotificationPermission>("default");
+
   const canModify = role === "owner" || role === "editor" || role === "viewer";
   const canDeleteMeeting = role === "owner" || permissions.canDeleteMeetings;
   const canDeletePoint = role === "owner" || permissions.canDeleteAllPoints;
 
-  function normalizeMeetings(value: unknown): Meeting[] {
-    if (!Array.isArray(value) || value.length === 0) {
-      return initialMeetings;
-    }
-
-    return (value as Meeting[]).map((meeting, index) => ({
-      ...meeting,
-      serialNumber: meeting.serialNumber || index + 1,
-      pinned: Boolean(meeting.pinned),
-      information: meeting.information || [],
-      action: meeting.action || [],
-    }));
-  }
+  const selectedMeeting =
+    meetings.find((meeting) => meeting.id === selectedMeetingId) || meetings[0];
 
   useEffect(() => {
     let active = true;
-
-    async function loadSharedData() {
-      setSyncStatus("LOADING");
-
+    async function load() {
       const { data: userData } = await supabase.auth.getUser();
       const user = userData.user;
-
       if (!user) {
-        if (active) {
-          setRole("viewer");
-          setDataLoaded(true);
-          setSyncStatus("SIGN IN REQUIRED");
-        }
+        setSyncStatus("SIGN IN REQUIRED");
+        setLoaded(true);
         return;
       }
 
       const { data: profile } = await supabase
         .from("profiles")
-        .select("role, can_delete_meetings, can_delete_all_points")
+        .select("role, can_delete_meetings, can_delete_all_points, full_name, email")
         .eq("id", user.id)
         .maybeSingle();
 
-      const loadedRole: UserRole =
+      if (!active) return;
+      setRole(
         profile?.role === "owner"
           ? "owner"
           : profile?.role === "editor"
             ? "editor"
-            : "viewer";
-
+            : "viewer"
+      );
       setPermissions({
         canDeleteMeetings: Boolean(profile?.can_delete_meetings),
         canDeleteAllPoints: Boolean(profile?.can_delete_all_points),
       });
+
+      const signedInName =
+        profile?.full_name?.trim() ||
+        user.user_metadata?.full_name?.trim() ||
+        user.email?.split("@")[0] ||
+        "Team Member";
+      setCurrentUserName(signedInName);
+
+      const { data: profileList, error: profileListError } = await supabase
+        .from("profiles")
+        .select("id, full_name, email")
+        .order("full_name", { ascending: true });
+
+      if (!profileListError && profileList) {
+        setTeamProfiles(profileList as TeamProfile[]);
+      }
 
       const { data, error } = await supabase
         .from("mom_shared_state")
@@ -254,29 +201,24 @@ export default function Page() {
         .eq("id", SHARED_STATE_ID)
         .maybeSingle();
 
-      if (!active) return;
-
-      setRole(loadedRole);
-
       if (error) {
         console.error(error);
         setSyncStatus("LOAD FAILED");
-        setDataLoaded(true);
+        setLoaded(true);
         return;
       }
 
-      const loadedMeetings = normalizeMeetings(data?.data);
+      const incoming = normalizeMeetings(data?.data);
       skipNextSave.current = Boolean(data?.data);
-      setMeetings(loadedMeetings);
-      setSelectedMeetingId(loadedMeetings[0].id);
-      setDataLoaded(true);
+      setMeetings(incoming);
+      setSelectedMeetingId(incoming[0].id);
       setSyncStatus("SYNCED");
+      setLoaded(true);
     }
 
-    loadSharedData();
-
+    load();
     const channel = supabase
-      .channel("mom-shared-state-live")
+      .channel("mom-live")
       .on(
         "postgres_changes",
         {
@@ -288,14 +230,13 @@ export default function Page() {
         (payload) => {
           const row = payload.new as { data?: unknown };
           if (!row?.data) return;
-
           const incoming = normalizeMeetings(row.data);
           skipNextSave.current = true;
           setMeetings(incoming);
-          setSelectedMeetingId((currentId) =>
-            incoming.some((meeting) => meeting.id === currentId)
-              ? currentId
-              : incoming[0].id
+          setSelectedMeetingId((current) =>
+            incoming.some((meeting) => meeting.id === current)
+              ? current
+              : incoming[0]?.id || 0
           );
           setSyncStatus("SYNCED");
         }
@@ -309,2931 +250,519 @@ export default function Page() {
   }, []);
 
   useEffect(() => {
-    if (!dataLoaded || !canModify) return;
-
+    if (!loaded || !canModify) return;
     if (skipNextSave.current) {
       skipNextSave.current = false;
       return;
     }
-
     const timer = window.setTimeout(async () => {
       setSyncStatus("SAVING");
-
-      const { error } = await supabase
-        .from("mom_shared_state")
-        .upsert(
-          {
-            id: SHARED_STATE_ID,
-            data: meetings,
-            updated_at: new Date().toISOString(),
-          },
-          { onConflict: "id" }
-        );
-
+      const { error } = await supabase.from("mom_shared_state").upsert(
+        {
+          id: SHARED_STATE_ID,
+          data: meetings,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "id" }
+      );
       if (error) {
         console.error(error);
         setSyncStatus("SAVE FAILED");
-        window.alert(`Save failed: ${error.message}`);
         return;
       }
-
       setSyncStatus("SYNCED");
     }, 350);
-
     return () => window.clearTimeout(timer);
-  }, [meetings, dataLoaded, canModify]);
+  }, [meetings, loaded, canModify]);
 
-  function requireModifyPermission() {
-    if (canModify) return true;
-    window.alert("You do not have permission to modify this data.");
-    closeEveryMenu();
-    return false;
-  }
+  useEffect(() => {
+    if (typeof Notification !== "undefined") {
+      setNotificationPermission(Notification.permission);
+    }
+  }, []);
 
-  const selectedMeeting =
-    meetings.find(
-      (meeting) =>
-        meeting.id === selectedMeetingId
-    ) || meetings[0];
+  useEffect(() => {
+    if (!loaded || !currentUserName || !selectedMeeting) return;
+
+    const alreadyAdded = selectedMeeting.attendance.some(
+      (person) => normalizeText(person.name) === normalizeText(currentUserName)
+    );
+
+    if (alreadyAdded) return;
+
+    updateSelectedMeeting((meeting) => ({
+      ...meeting,
+      attendance: [
+        ...meeting.attendance,
+        {
+          id: Date.now(),
+          name: currentUserName,
+          status: "Present",
+        },
+      ],
+    }));
+  }, [loaded, currentUserName, selectedMeetingId]);
 
   const filteredMeetings = useMemo(() => {
-    const search =
-      normalizeText(searchText);
-
+    const query = normalizeText(search);
     return [...meetings]
       .filter((meeting) => {
-        const name =
-          meeting.name.toLowerCase();
-
-        const date =
-          formatDate(
-            meeting.date
-          ).toLowerCase();
-
-        return (
-          name.includes(search) ||
-          date.includes(search)
-        );
+        const points = [...meeting.information, ...meeting.action];
+        const haystack = [
+          meeting.name,
+          formatDate(meeting.date),
+          ...points.flatMap((point) => [
+            point.text,
+            point.addedBy,
+            point.responsiblePerson || "",
+            point.dueDate || "",
+          ]),
+          ...meeting.attendance.map((person) => person.name),
+        ]
+          .join(" ")
+          .toLowerCase();
+        return haystack.includes(query);
       })
       .sort(
-        (
-          firstMeeting,
-          secondMeeting
-        ) => {
-          const pinDifference =
-            Number(
-              Boolean(
-                secondMeeting.pinned
-              )
-            ) -
-            Number(
-              Boolean(
-                firstMeeting.pinned
-              )
-            );
-
-          if (pinDifference !== 0) {
-            return pinDifference;
-          }
-
-          return (
-            new Date(
-              secondMeeting.date
-            ).getTime() -
-            new Date(
-              firstMeeting.date
-            ).getTime()
-          );
-        }
+        (a, b) =>
+          Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)) ||
+          new Date(b.date).getTime() - new Date(a.date).getTime()
       );
-  }, [meetings, searchText]);
-
-  const totalPoints = meetings.reduce(
-    (total, meeting) =>
-      total +
-      meeting.information.length +
-      meeting.action.length,
-    0
-  );
-
-  const openActions = meetings.reduce(
-    (total, meeting) =>
-      total +
-      meeting.action.filter(
-        (point) =>
-          point.status === "Open"
-      ).length,
-    0
-  );
+  }, [meetings, search]);
 
   const teamMembers = useMemo(() => {
-    if (!selectedMeeting) {
-      return [];
-    }
-
-    const allPoints = [
-      ...selectedMeeting.information,
-      ...selectedMeeting.action,
-    ];
-
-    const uniqueMemberMap =
-      new Map<string, string>();
-
-    allPoints.forEach((point) => {
-      const normalizedName =
-        normalizeText(point.addedBy);
-
-      if (
-        normalizedName &&
-        !uniqueMemberMap.has(
-          normalizedName
-        )
-      ) {
-        uniqueMemberMap.set(
-          normalizedName,
-          point.addedBy.trim()
-        );
-      }
-    });
-
-    return Array.from(
-      uniqueMemberMap.values()
-    ).sort((firstName, secondName) =>
-      firstName.localeCompare(
-        secondName
-      )
-    );
+    if (!selectedMeeting) return [];
+    const names = [
+      ...selectedMeeting.attendance.map((person) => person.name),
+      ...selectedMeeting.information.map((point) => point.addedBy),
+      ...selectedMeeting.action.flatMap((point) => [
+        point.addedBy,
+        point.responsiblePerson || "",
+      ]),
+    ].filter(Boolean);
+    return Array.from(new Set(names)).sort();
   }, [selectedMeeting]);
 
-  const filteredMemberSuggestions =
-    useMemo(() => {
-      const search =
-        normalizeText(memberFilter);
-
-      if (!search) {
-        return teamMembers;
-      }
-
-      return teamMembers.filter(
-        (name) =>
-          normalizeText(name).includes(
-            search
-          )
-      );
-    }, [memberFilter, teamMembers]);
-
-  const selectedMemberName =
-    useMemo(() => {
-      const search =
-        normalizeText(memberFilter);
-
-      if (!search) {
-        return "";
-      }
-
-      const exactMember =
-        teamMembers.find(
-          (name) =>
-            normalizeText(name) === search
-        );
-
-      return exactMember || memberFilter.trim();
-    }, [memberFilter, teamMembers]);
-
-  const filteredInformationPoints =
-    useMemo(() => {
-      if (!selectedMeeting) {
-        return [];
-      }
-
-      const search =
-        normalizeText(memberFilter);
-
-      if (!search) {
-        return selectedMeeting.information;
-      }
-
-      return selectedMeeting.information.filter(
-        (point) =>
-          normalizeText(
-            point.addedBy
-          ).includes(search)
-      );
-    }, [
-      memberFilter,
-      selectedMeeting,
-    ]);
-
-  const filteredActionPoints =
-    useMemo(() => {
-      if (!selectedMeeting) {
-        return [];
-      }
-
-      const search =
-        normalizeText(memberFilter);
-
-      if (!search) {
-        return selectedMeeting.action;
-      }
-
-      return selectedMeeting.action.filter(
-        (point) =>
-          normalizeText(
-            point.addedBy
-          ).includes(search)
-      );
-    }, [
-      memberFilter,
-      selectedMeeting,
-    ]);
-
-  const filteredMemberTotal =
-    filteredInformationPoints.length +
-    filteredActionPoints.length;
-
-  const currentPoints =
-    activeTab === "information"
-      ? filteredInformationPoints
-      : filteredActionPoints;
-
-  const displayedPoints =
-    [...currentPoints].sort(
-      (
-        firstPoint,
-        secondPoint
-      ) =>
-        Number(
-          Boolean(
-            secondPoint.pinned
-          )
-        ) -
-        Number(
-          Boolean(
-            firstPoint.pinned
-          )
+  const displayedPoints = useMemo(() => {
+    if (!selectedMeeting || activeTab === "attendance") return [];
+    const points =
+      activeTab === "information"
+        ? selectedMeeting.information
+        : selectedMeeting.action;
+    const query = normalizeText(search);
+    return [...points]
+      .filter((point) => {
+        if (memberFilter && point.addedBy !== memberFilter) return false;
+        if (
+          responsibleFilter &&
+          point.responsiblePerson !== responsibleFilter
         )
-    );
+          return false;
+        if (statusFilter !== "all" && point.status !== statusFilter) return false;
+        if (dueFilter !== "all" && dueState(point) !== dueFilter) return false;
+        return [
+          point.text,
+          point.addedBy,
+          point.responsiblePerson || "",
+          point.dueDate || "",
+        ]
+          .join(" ")
+          .toLowerCase()
+          .includes(query);
+      })
+      .sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)));
+  }, [
+    selectedMeeting,
+    activeTab,
+    search,
+    memberFilter,
+    responsibleFilter,
+    statusFilter,
+    dueFilter,
+  ]);
 
-  function closeEveryMenu() {
-    setOpenPointMenuId(null);
-    setOpenMeetingMenuId(null);
-  }
+  const allActions = meetings.flatMap((meeting) =>
+    meeting.action.map((point) => ({ ...point, meetingName: meeting.name }))
+  );
+  const openActions = allActions.filter((point) => point.status !== "Completed");
+  const overdueActions = openActions.filter((point) => dueState(point) === "overdue");
+  const dueSoonActions = openActions.filter((point) =>
+    ["today", "soon"].includes(dueState(point))
+  );
 
-  function selectMeeting(
-    meetingId: number
-  ) {
-    setSelectedMeetingId(meetingId);
-    setActiveTab("information");
-    setMemberFilter("");
-    setShowMemberSuggestions(false);
-    setEditingPointId(null);
-    setEditPointText("");
-    closeEveryMenu();
-  }
-
-  function changeTab(
-    newTab: ActiveTab
-  ) {
-    setActiveTab(newTab);
-    setEditingPointId(null);
-    setEditPointText("");
-    closeEveryMenu();
-  }
-
-  function selectTeamMember(
-    name: string
-  ) {
-    setMemberFilter(name);
-    setShowMemberSuggestions(false);
-    setEditingPointId(null);
-    setEditPointText("");
-    closeEveryMenu();
-  }
-
-  function clearMemberFilter() {
-    setMemberFilter("");
-    setShowMemberSuggestions(false);
-    setEditingPointId(null);
-    setEditPointText("");
-    closeEveryMenu();
-  }
-
-  function openNewMeetingModal() {
-    if (!requireModifyPermission()) return;
-    const today =
-      new Date()
-        .toISOString()
-        .slice(0, 10);
-
-    setNewMeetingName("");
-    setNewMeetingDate(today);
-    setShowNewMeetingModal(true);
-    closeEveryMenu();
-  }
-
-  function closeNewMeetingModal() {
-    setShowNewMeetingModal(false);
-    setNewMeetingName("");
-    setNewMeetingDate("");
-  }
-
-  function createNewMeeting() {
-    if (!requireModifyPermission()) return;
-    if (!newMeetingDate) {
-      window.alert(
-        "Please select a meeting date."
-      );
-      return;
-    }
-
-    const highestSerialNumber =
-      meetings.reduce(
-        (
-          highestNumber,
-          meeting
-        ) =>
-          Math.max(
-            highestNumber,
-            meeting.serialNumber || 0
-          ),
-        0
-      );
-
-    const nextSerialNumber =
-      highestSerialNumber + 1;
-
-    const typedMeetingName =
-      newMeetingName.trim();
-
-    const finalMeetingName =
-      typedMeetingName ||
-      `TBM-${nextSerialNumber}`;
-
-    const newMeeting: Meeting = {
-      id: Date.now(),
-      serialNumber:
-        nextSerialNumber,
-      name: finalMeetingName,
-      date: newMeetingDate,
-      pinned: false,
-      information: [],
-      action: [],
-    };
-
-    setMeetings(
-      (currentMeetings) => [
-        ...currentMeetings,
-        newMeeting,
-      ]
-    );
-
-    setSelectedMeetingId(
-      newMeeting.id
-    );
-    setActiveTab("information");
-    setMemberFilter("");
-    setNewMeetingName("");
-    setNewMeetingDate("");
-    setShowNewMeetingModal(false);
-  }
-
-  function toggleMeetingMenu(
-    meetingId: number
-  ) {
-    setOpenPointMenuId(null);
-
-    setOpenMeetingMenuId(
-      (currentMenuId) =>
-        currentMenuId === meetingId
-          ? null
-          : meetingId
+  function updateSelectedMeeting(updater: (meeting: Meeting) => Meeting) {
+    setMeetings((current) =>
+      current.map((meeting) =>
+        meeting.id === selectedMeetingId ? updater(meeting) : meeting
+      )
     );
   }
 
-  function openEditMeetingModal(
-    meeting: Meeting
-  ) {
-    if (!requireModifyPermission()) return;
-    setEditMeetingId(meeting.id);
-    setEditMeetingName(
-      meeting.name
-    );
-    setEditMeetingDate(
-      meeting.date
-    );
-    setShowEditMeetingModal(true);
-    closeEveryMenu();
-  }
-
-  function closeEditMeetingModal() {
-    setShowEditMeetingModal(false);
+  function openCreateMeeting() {
     setEditMeetingId(null);
-    setEditMeetingName("");
-    setEditMeetingDate("");
+    setMeetingName("");
+    setMeetingDate(new Date().toISOString().slice(0, 10));
+    setMeetingModal(true);
   }
 
-  function saveEditedMeeting() {
-    if (!requireModifyPermission()) return;
-    if (editMeetingId === null) {
-      return;
-    }
+  function openEditMeeting(meeting: Meeting) {
+    setEditMeetingId(meeting.id);
+    setMeetingName(meeting.name);
+    setMeetingDate(meeting.date);
+    setMeetingModal(true);
+  }
 
-    if (!editMeetingName.trim()) {
-      window.alert(
-        "Meeting name cannot be empty."
-      );
-      return;
-    }
-
-    if (!editMeetingDate) {
-      window.alert(
-        "Please select a meeting date."
-      );
-      return;
-    }
-
-    setMeetings(
-      (currentMeetings) =>
-        currentMeetings.map(
-          (meeting) => {
-            if (
-              meeting.id !==
-              editMeetingId
-            ) {
-              return meeting;
-            }
-
-            return {
-              ...meeting,
-              name:
-                editMeetingName.trim(),
-              date: editMeetingDate,
-            };
-          }
+  function saveMeeting() {
+    if (!meetingDate) return window.alert("Select a meeting date.");
+    if (editMeetingId) {
+      setMeetings((current) =>
+        current.map((meeting) =>
+          meeting.id === editMeetingId
+            ? { ...meeting, name: meetingName.trim() || meeting.name, date: meetingDate }
+            : meeting
         )
-    );
-
-    closeEditMeetingModal();
-  }
-
-  function togglePinMeeting(
-    meetingId: number
-  ) {
-    if (!requireModifyPermission()) return;
-    setMeetings(
-      (currentMeetings) =>
-        currentMeetings.map(
-          (meeting) => {
-            if (
-              meeting.id !== meetingId
-            ) {
-              return meeting;
-            }
-
-            return {
-              ...meeting,
-              pinned:
-                !meeting.pinned,
-            };
-          }
-        )
-    );
-
-    closeEveryMenu();
-  }
-
-  function deleteMeeting(
-    meetingId: number
-  ) {
-    if (!canDeleteMeeting) {
-      window.alert("You do not have permission to delete meetings.");
-      closeEveryMenu();
-      return;
-    }
-
-    const meetingToDelete = meetings.find(
-      (meeting) => meeting.id === meetingId
-    );
-
-    const shouldDelete = window.confirm(
-      `Delete ${meetingToDelete?.name || "this TBM"} and all its points?`
-    );
-
-    if (!shouldDelete) {
-      closeEveryMenu();
-      return;
-    }
-
-    const remainingMeetings = meetings.filter(
-      (meeting) => meeting.id !== meetingId
-    );
-
-    setMeetings(remainingMeetings);
-
-    if (selectedMeetingId === meetingId) {
-      setSelectedMeetingId(
-        remainingMeetings.length > 0 ? remainingMeetings[0].id : 0
       );
-      setActiveTab("information");
-      setMemberFilter("");
+    } else {
+      const serial = Math.max(0, ...meetings.map((meeting) => meeting.serialNumber)) + 1;
+      const meeting: Meeting = {
+        id: Date.now(),
+        serialNumber: serial,
+        name: meetingName.trim() || `TBM-${serial}`,
+        date: meetingDate,
+        information: [],
+        action: [],
+        attendance: [],
+      };
+      setMeetings((current) => [...current, meeting]);
+      setSelectedMeetingId(meeting.id);
     }
-
-    closeEveryMenu();
+    setMeetingModal(false);
   }
 
-  function openPointModal() {
-    if (!requireModifyPermission()) return;
-    setMemberName(
-      selectedMemberName || ""
-    );
+  function deleteMeeting(id: number) {
+    if (!canDeleteMeeting) return window.alert("No permission to delete TBM.");
+    if (!window.confirm("Delete this TBM and all its data?")) return;
+    const remaining = meetings.filter((meeting) => meeting.id !== id);
+    setMeetings(remaining);
+    if (selectedMeetingId === id) setSelectedMeetingId(remaining[0]?.id || 0);
+  }
+
+  function openNewPoint() {
+    setEditingPointId(null);
     setPointText("");
-    setShowPointModal(true);
-    closeEveryMenu();
+    setAddedBy("");
+    setResponsiblePerson("");
+    setDueDate("");
+    setPointModal(true);
   }
 
-  function closePointModal() {
-    setShowPointModal(false);
-    setMemberName("");
-    setPointText("");
+  function openEditPoint(point: MeetingPoint) {
+    setEditingPointId(point.id);
+    setPointText(point.text);
+    setAddedBy(point.addedBy);
+    setResponsiblePerson(point.responsiblePerson || "");
+    setDueDate(point.dueDate || "");
+    setPointModal(true);
   }
 
-  function addNewPoint() {
-    if (!requireModifyPermission()) return;
-    if (!memberName.trim()) {
-      window.alert(
-        "Please enter the member name."
-      );
-      return;
+  function savePoint() {
+    if (!pointText.trim() || !addedBy.trim()) {
+      return window.alert("Added by and point details are required.");
     }
-
-    if (!pointText.trim()) {
-      window.alert(
-        "Please enter the point details."
-      );
-      return;
-    }
-
-    const currentTime =
-      new Date().toLocaleTimeString(
-        "en-US",
-        {
+    const key = activeTab === "action" ? "action" : "information";
+    updateSelectedMeeting((meeting) => {
+      const list = meeting[key];
+      if (editingPointId) {
+        return {
+          ...meeting,
+          [key]: list.map((point) =>
+            point.id === editingPointId
+              ? {
+                  ...point,
+                  text: pointText.trim(),
+                  addedBy: addedBy.trim(),
+                  responsiblePerson:
+                    key === "action" ? responsiblePerson.trim() : undefined,
+                  dueDate: key === "action" ? dueDate : undefined,
+                }
+              : point
+          ),
+        };
+      }
+      const point: MeetingPoint = {
+        id: Date.now(),
+        text: pointText.trim(),
+        addedBy: addedBy.trim(),
+        addedAt: new Date().toLocaleTimeString("en-US", {
           hour: "2-digit",
           minute: "2-digit",
-        }
-      );
-
-    if (
-      activeTab ===
-      "information"
-    ) {
-      const newInformationPoint:
-        MeetingPoint = {
-          id: Date.now(),
-          text: pointText.trim(),
-          addedBy:
-            memberName.trim(),
-          addedAt: currentTime,
-          pinned: false,
-        };
-
-      setMeetings(
-        (currentMeetings) =>
-          currentMeetings.map(
-            (meeting) => {
-              if (
-                meeting.id !==
-                selectedMeetingId
-              ) {
-                return meeting;
-              }
-
-              return {
-                ...meeting,
-                information: [
-                  ...meeting.information,
-                  newInformationPoint,
-                ],
-              };
-            }
-          )
-      );
-    } else {
-      const newActionPoint:
-        MeetingPoint = {
-          id: Date.now(),
-          text: pointText.trim(),
-          addedBy:
-            memberName.trim(),
-          addedAt: currentTime,
-          status: "Open",
-          pinned: false,
-        };
-
-      setMeetings(
-        (currentMeetings) =>
-          currentMeetings.map(
-            (meeting) => {
-              if (
-                meeting.id !==
-                selectedMeetingId
-              ) {
-                return meeting;
-              }
-
-              return {
-                ...meeting,
-                action: [
-                  ...meeting.action,
-                  newActionPoint,
-                ],
-              };
-            }
-          )
-      );
-    }
-
-    setMemberName("");
-    setPointText("");
-    setShowPointModal(false);
+        }),
+        pinned: false,
+        status: key === "action" ? "Open" : undefined,
+        responsiblePerson:
+          key === "action" ? responsiblePerson.trim() : undefined,
+        dueDate: key === "action" ? dueDate : undefined,
+      };
+      return { ...meeting, [key]: [...list, point] };
+    });
+    setPointModal(false);
   }
 
-  function togglePointMenu(
-    pointId: number
-  ) {
-    setOpenMeetingMenuId(null);
+  function mutatePoint(id: number, updater: (point: MeetingPoint) => MeetingPoint) {
+    const key = activeTab === "action" ? "action" : "information";
+    updateSelectedMeeting((meeting) => ({
+      ...meeting,
+      [key]: meeting[key].map((point) => (point.id === id ? updater(point) : point)),
+    }));
+  }
 
-    setOpenPointMenuId(
-      (currentMenuId) =>
-        currentMenuId === pointId
-          ? null
-          : pointId
+  function deletePoint(id: number) {
+    if (!canDeletePoint) return window.alert("No permission to delete points.");
+    if (!window.confirm("Delete this point permanently?")) return;
+    const key = activeTab === "action" ? "action" : "information";
+    updateSelectedMeeting((meeting) => ({
+      ...meeting,
+      [key]: meeting[key].filter((point) => point.id !== id),
+    }));
+  }
+
+  function addAttendance() {
+    const profile = teamProfiles.find(
+      (item) => item.id === attendanceProfileId
     );
-  }
 
-  function startEditingPoint(
-    pointId: number,
-    currentText: string
-  ) {
-    if (!requireModifyPermission()) return;
-    setEditingPointId(pointId);
-    setEditPointText(currentText);
-    closeEveryMenu();
-  }
-
-  function cancelEditingPoint() {
-    setEditingPointId(null);
-    setEditPointText("");
-  }
-
-  function saveEditedPoint(
-    pointId: number
-  ) {
-    if (!requireModifyPermission()) return;
-    if (!editPointText.trim()) {
-      window.alert(
-        "Point details cannot be empty."
-      );
+    if (!profile) {
+      window.alert("Select a team member from the dropdown.");
       return;
     }
 
-    if (
-      activeTab ===
-      "information"
-    ) {
-      setMeetings(
-        (currentMeetings) =>
-          currentMeetings.map(
-            (meeting) => {
-              if (
-                meeting.id !==
-                selectedMeetingId
-              ) {
-                return meeting;
-              }
+    const name =
+      profile.full_name?.trim() ||
+      profile.email?.split("@")[0] ||
+      "Team Member";
 
-              return {
-                ...meeting,
-                information:
-                  meeting.information.map(
-                    (point) =>
-                      point.id ===
-                      pointId
-                        ? {
-                            ...point,
-                            text:
-                              editPointText.trim(),
-                          }
-                        : point
-                  ),
-              };
-            }
-          )
-      );
-    } else {
-      setMeetings(
-        (currentMeetings) =>
-          currentMeetings.map(
-            (meeting) => {
-              if (
-                meeting.id !==
-                selectedMeetingId
-              ) {
-                return meeting;
-              }
-
-              return {
-                ...meeting,
-                action:
-                  meeting.action.map(
-                    (point) =>
-                      point.id ===
-                      pointId
-                        ? {
-                            ...point,
-                            text:
-                              editPointText.trim(),
-                          }
-                        : point
-                  ),
-              };
-            }
-          )
-      );
-    }
-
-    setEditingPointId(null);
-    setEditPointText("");
-  }
-
-  function togglePinPoint(
-    pointId: number
-  ) {
-    if (!requireModifyPermission()) return;
-    if (
-      activeTab ===
-      "information"
-    ) {
-      setMeetings(
-        (currentMeetings) =>
-          currentMeetings.map(
-            (meeting) => {
-              if (
-                meeting.id !==
-                selectedMeetingId
-              ) {
-                return meeting;
-              }
-
-              return {
-                ...meeting,
-                information:
-                  meeting.information.map(
-                    (point) =>
-                      point.id ===
-                      pointId
-                        ? {
-                            ...point,
-                            pinned:
-                              !point.pinned,
-                          }
-                        : point
-                  ),
-              };
-            }
-          )
-      );
-    } else {
-      setMeetings(
-        (currentMeetings) =>
-          currentMeetings.map(
-            (meeting) => {
-              if (
-                meeting.id !==
-                selectedMeetingId
-              ) {
-                return meeting;
-              }
-
-              return {
-                ...meeting,
-                action:
-                  meeting.action.map(
-                    (point) =>
-                      point.id ===
-                      pointId
-                        ? {
-                            ...point,
-                            pinned:
-                              !point.pinned,
-                          }
-                        : point
-                  ),
-              };
-            }
-          )
-      );
-    }
-
-    closeEveryMenu();
-  }
-
-  function changeActionStatus(
-    pointId: number
-  ) {
-    if (!requireModifyPermission()) return;
-    setMeetings(
-      (currentMeetings) =>
-        currentMeetings.map(
-          (meeting) => {
-            if (
-              meeting.id !==
-              selectedMeetingId
-            ) {
-              return meeting;
-            }
-
-            return {
-              ...meeting,
-              action:
-                meeting.action.map(
-                  (point) => {
-                    if (
-                      point.id !==
-                      pointId
-                    ) {
-                      return point;
-                    }
-
-                    const updatedStatus:
-                      PointStatus =
-                      point.status ===
-                      "Completed"
-                        ? "Open"
-                        : "Completed";
-
-                    return {
-                      ...point,
-                      status:
-                        updatedStatus,
-                    };
-                  }
-                ),
-            };
-          }
+    updateSelectedMeeting((meeting) => {
+      if (
+        meeting.attendance.some(
+          (person) => normalizeText(person.name) === normalizeText(name)
         )
-    );
+      ) {
+        return meeting;
+      }
+
+      return {
+        ...meeting,
+        attendance: [
+          ...meeting.attendance,
+          { id: Date.now(), name, status: "Present" },
+        ],
+      };
+    });
+
+    setAttendanceProfileId("");
   }
 
-  function deletePoint(
-    pointId: number
-  ) {
-    if (!canDeletePoint) {
-      window.alert("You do not have permission to delete points.");
-      closeEveryMenu();
-      return;
+  function updateAttendance(id: number, status: AttendanceStatus) {
+    updateSelectedMeeting((meeting) => ({
+      ...meeting,
+      attendance: meeting.attendance.map((person) =>
+        person.id === id ? { ...person, status } : person
+      ),
+    }));
+  }
+
+  function removeAttendance(id: number) {
+    if (!canDeletePoint) return window.alert("No permission to remove attendance.");
+    updateSelectedMeeting((meeting) => ({
+      ...meeting,
+      attendance: meeting.attendance.filter((person) => person.id !== id),
+    }));
+  }
+
+  async function enableNotifications() {
+    if (typeof Notification === "undefined") {
+      return window.alert("Notifications are not supported in this browser.");
     }
-    const shouldDelete =
-      window.confirm(
-        "Do you want to permanently delete this point?"
-      );
-
-    if (!shouldDelete) {
-      closeEveryMenu();
-      return;
+    const permission = await Notification.requestPermission();
+    setNotificationPermission(permission);
+    if (permission === "granted") {
+      new Notification("MOM Meeting Hub", {
+        body: `${overdueActions.length} overdue and ${dueSoonActions.length} due soon action(s).`,
+        icon: "/mom-icon.svg",
+      });
     }
+  }
 
-    if (
-      activeTab ===
-      "information"
-    ) {
-      setMeetings(
-        (currentMeetings) =>
-          currentMeetings.map(
-            (meeting) => {
-              if (
-                meeting.id !==
-                selectedMeetingId
-              ) {
-                return meeting;
-              }
-
-              return {
-                ...meeting,
-                information:
-                  meeting.information.filter(
-                    (point) =>
-                      point.id !==
-                      pointId
-                  ),
-              };
-            }
-          )
+  function showReminder() {
+    const lines = [...overdueActions, ...dueSoonActions]
+      .slice(0, 8)
+      .map(
+        (point) =>
+          `${point.meetingName}: ${point.text} | ${point.responsiblePerson || "Unassigned"} | ${formatDate(point.dueDate || "")}`
       );
-    } else {
-      setMeetings(
-        (currentMeetings) =>
-          currentMeetings.map(
-            (meeting) => {
-              if (
-                meeting.id !==
-                selectedMeetingId
-              ) {
-                return meeting;
-              }
+    window.alert(lines.length ? lines.join("\n\n") : "No overdue or upcoming actions.");
+  }
 
-              return {
-                ...meeting,
-                action:
-                  meeting.action.filter(
-                    (point) =>
-                      point.id !==
-                      pointId
-                  ),
-              };
-            }
-          )
+  function generateReport() {
+    if (!selectedMeeting) return;
+    const escape = (value: string) =>
+      value.replace(/[&<>"']/g, (character) =>
+        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" })[character] || character
       );
-    }
-
-    closeEveryMenu();
+    const rows = selectedMeeting.action
+      .map(
+        (point, index) => `<tr><td>${index + 1}</td><td>${escape(point.text)}</td><td>${escape(point.responsiblePerson || "Unassigned")}</td><td>${escape(formatDate(point.dueDate || ""))}</td><td>${escape(point.status || "Open")}</td></tr>`
+      )
+      .join("");
+    const information = selectedMeeting.information
+      .map((point, index) => `<li><strong>${index + 1}.</strong> ${escape(point.text)} <small>(${escape(point.addedBy)})</small></li>`)
+      .join("");
+    const attendance = selectedMeeting.attendance
+      .map((person) => `<li>${escape(person.name)}: ${person.status}</li>`)
+      .join("");
+    const report = window.open("", "_blank", "width=1000,height=800");
+    if (!report) return;
+    report.document.write(`<!doctype html><html><head><title>${escape(selectedMeeting.name)} Report</title><style>body{font-family:Arial;padding:32px;color:#18212f}h1{margin-bottom:4px}small{color:#667}table{width:100%;border-collapse:collapse;margin-top:12px}th,td{border:1px solid #ccd3dc;padding:9px;text-align:left}th{background:#edf3f8}section{margin-top:28px}@media print{button{display:none}}</style></head><body><button onclick="window.print()">Print / Save PDF</button><h1>${escape(selectedMeeting.name)}</h1><p>${escape(formatDate(selectedMeeting.date))}</p><section><h2>Attendance</h2><ul>${attendance || "<li>No attendance recorded</li>"}</ul></section><section><h2>Information Points</h2><ol>${information || "<li>No information points</li>"}</ol></section><section><h2>Action Points</h2><table><thead><tr><th>#</th><th>Action</th><th>Responsible</th><th>Due Date</th><th>Status</th></tr></thead><tbody>${rows || '<tr><td colspan="5">No action points</td></tr>'}</tbody></table></section><p><small>Generated ${new Date().toLocaleString("en-GB")}</small></p></body></html>`);
+    report.document.close();
   }
 
   if (!selectedMeeting) {
     return (
-      <div className="mom-page">
-        <h1>
-          No meeting available.
-        </h1>
-      </div>
+      <main className="empty-page">
+        <h1>No meeting available</h1>
+        <button onClick={openCreateMeeting}>Create your first TBM</button>
+      </main>
     );
   }
 
   return (
-    <>
+    <main className="page">
       <style jsx global>{`
-        * {
-          box-sizing: border-box;
-        }
-
-        html,
-        body {
-          margin: 0;
-          min-height: 100%;
-          background: #060d18;
-        }
-
-        body {
-          color: #edf7ff;
-          font-family: Inter, "Segoe UI",
-            Arial, sans-serif;
-        }
-
-        button,
-        input,
-        textarea {
-          font: inherit;
-        }
-
-        button {
-          appearance: none;
-          -webkit-appearance: none;
-        }
-
-        .mom-page {
-          min-height: 100vh;
-          padding: 30px;
-          background:
-            radial-gradient(
-              circle at 8% 5%,
-              rgba(9, 192, 224, 0.22),
-              transparent 27%
-            ),
-            radial-gradient(
-              circle at 94% 25%,
-              rgba(107, 66, 218, 0.28),
-              transparent 32%
-            ),
-            #06101d;
-        }
-
-        .mom-container {
-          width: 100%;
-          max-width: 1450px;
-          margin: auto;
-        }
-
-        .top-header {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: 24px;
-          margin-bottom: 28px;
-        }
-
-        .eyebrow {
-          margin: 0;
-          color: #60e8fa;
-          font-size: 12px;
-          font-weight: 900;
-          letter-spacing: 2.3px;
-        }
-
-        .main-title {
-          margin: 10px 0 12px;
-          font-size: clamp(
-            40px,
-            5vw,
-            68px
-          );
-          line-height: 1;
-          letter-spacing: -2px;
-        }
-
-        .main-title span {
-          color: transparent;
-          background: linear-gradient(
-            90deg,
-            #11c9e9,
-            #9875ff
-          );
-          background-clip: text;
-          -webkit-background-clip: text;
-        }
-
-        .description {
-          max-width: 760px;
-          margin: 0;
-          color: #94a9bc;
-          line-height: 1.65;
-        }
-
-        .primary-button {
-          padding: 15px 22px;
-          color: white;
-          background: linear-gradient(
-            135deg,
-            #159cf0,
-            #6870f4
-          );
-          border: 1px solid
-            rgba(133, 204, 255, 0.3);
-          border-radius: 16px;
-          box-shadow: 0 13px 34px
-            rgba(14, 152, 237, 0.27);
-          font-weight: 800;
-          cursor: pointer;
-          transition: 0.2s ease;
-        }
-
-        .primary-button:hover {
-          transform: translateY(-2px);
-          filter: brightness(1.1);
-        }
-
-        .stats-grid {
-          display: grid;
-          grid-template-columns: repeat(
-            4,
-            minmax(0, 1fr)
-          );
-          gap: 15px;
-          margin-bottom: 20px;
-        }
-
-        .stat-card {
-          padding: 21px;
-          background:
-            rgba(255, 255, 255, 0.055);
-          border: 1px solid
-            rgba(255, 255, 255, 0.11);
-          border-radius: 24px;
-          backdrop-filter: blur(17px);
-        }
-
-        .stat-card p {
-          margin: 0;
-          color: #8ca0b4;
-          font-size: 12px;
-          font-weight: 700;
-          letter-spacing: 1.2px;
-        }
-
-        .stat-card h2 {
-          margin: 11px 0 0;
-          font-size: 35px;
-        }
-
-        .saved-text {
-          color: #55e5a3;
-          font-size: 27px !important;
-        }
-
-        .meeting-layout {
-          display: grid;
-          grid-template-columns:
-            340px minmax(0, 1fr);
-          gap: 18px;
-        }
-
-        .panel {
-          background:
-            rgba(255, 255, 255, 0.05);
-          border: 1px solid
-            rgba(255, 255, 255, 0.11);
-          border-radius: 25px;
-          box-shadow: 0 24px 80px
-            rgba(0, 0, 0, 0.24);
-          backdrop-filter: blur(17px);
-        }
-
-        .history-panel {
-          padding: 20px;
-          overflow: visible;
-        }
-
-        .history-heading {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          margin-bottom: 16px;
-        }
-
-        .history-heading h2 {
-          margin: 0;
-        }
-
-        .history-heading span {
-          padding: 7px 11px;
-          color: #61e7fa;
-          background:
-            rgba(17, 201, 233, 0.1);
-          border-radius: 999px;
-          font-size: 12px;
-        }
-
-        .search-input {
-          width: 100%;
-          margin-bottom: 14px;
-          padding: 14px 15px;
-          color: white;
-          background:
-            rgba(1, 8, 16, 0.73);
-          border: 1px solid
-            rgba(255, 255, 255, 0.11);
-          border-radius: 14px;
-          outline: none;
-        }
-
-        .search-input:focus {
-          border-color:
-            rgba(22, 140, 255, 0.7);
-          box-shadow: 0 0 0 3px
-            rgba(22, 140, 255, 0.1);
-        }
-
-        .history-list {
-          display: flex;
-          flex-direction: column;
-          gap: 11px;
-        }
-
-        .meeting-history-card {
-          position: relative;
-          display: flex;
-          align-items: flex-start;
-          gap: 10px;
-          padding: 17px;
-          background:
-            rgba(255, 255, 255, 0.025);
-          border: 1px solid
-            rgba(255, 255, 255, 0.075);
-          border-radius: 19px;
-        }
-
-        .meeting-history-card.selected {
-          background: linear-gradient(
-            120deg,
-            rgba(22, 140, 255, 0.2),
-            rgba(92, 74, 221, 0.14)
-          );
-          border-color:
-            rgba(59, 168, 255, 0.65);
-        }
-
-        .meeting-history-card.pinned {
-          box-shadow:
-            inset 4px 0 0 #168cff;
-        }
-
-        .meeting-history-main {
-          min-width: 0;
-          flex: 1;
-          padding: 0;
-          color: white;
-          background: transparent;
-          border: none;
-          text-align: left;
-          cursor: pointer;
-        }
-
-        .meeting-history-main strong,
-        .meeting-history-main small {
-          display: block;
-        }
-
-        .meeting-history-main strong {
-          margin-bottom: 8px;
-          font-size: 18px;
-          overflow-wrap: anywhere;
-        }
-
-        .meeting-history-main small {
-          margin-top: 6px;
-          color: #8fa4b8;
-        }
-
-        .history-pin-label {
-          display: inline-flex;
-          margin-bottom: 8px;
-          padding: 4px 8px;
-          color: #5cb5ff;
-          background:
-            rgba(22, 140, 255, 0.12);
-          border-radius: 999px;
-          font-size: 9px;
-          font-weight: 900;
-        }
-
-        .meeting-panel {
-          min-width: 0;
-          padding: 25px;
-        }
-
-        .meeting-header {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: 20px;
-        }
-
-        .meeting-header h2 {
-          margin: 0;
-          font-size: 34px;
-          overflow-wrap: anywhere;
-        }
-
-        .meeting-date {
-          margin: 8px 0 0;
-          color: #91a6ba;
-        }
-
-        .add-point-button {
-          padding: 14px 22px;
-          color: white;
-          background: linear-gradient(
-            135deg,
-            #168cff,
-            #6068ed
-          );
-          border: 1px solid
-            rgba(255, 255, 255, 0.18);
-          border-radius: 15px;
-          font-weight: 850;
-          cursor: pointer;
-        }
-
-        .member-filter {
-          position: relative;
-          margin: 22px 0 18px;
-          padding: 17px;
-          background: linear-gradient(
-            120deg,
-            rgba(13, 68, 104, 0.24),
-            rgba(57, 40, 113, 0.2)
-          );
-          border: 1px solid
-            rgba(72, 173, 255, 0.2);
-          border-radius: 19px;
-        }
-
-        .member-filter-heading {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: 14px;
-          margin-bottom: 12px;
-        }
-
-        .member-filter-title {
-          display: flex;
-          align-items: center;
-          gap: 11px;
-        }
-
-        .member-filter-icon {
-          display: grid;
-          place-items: center;
-          width: 38px;
-          height: 38px;
-          color: #73d7ff;
-          background:
-            rgba(22, 140, 255, 0.13);
-          border-radius: 12px;
-          font-weight: 900;
-        }
-
-        .member-filter-title strong,
-        .member-filter-title small {
-          display: block;
-        }
-
-        .member-filter-title strong {
-          margin-bottom: 3px;
-          font-size: 14px;
-        }
-
-        .member-filter-title small {
-          color: #8197aa;
-          font-size: 11px;
-        }
-
-        .member-result-count {
-          padding: 7px 10px;
-          color: #71d7ff;
-          background:
-            rgba(22, 140, 255, 0.1);
-          border-radius: 999px;
-          font-size: 11px;
-          font-weight: 800;
-        }
-
-        .member-search-row {
-          display: flex;
-          gap: 9px;
-        }
-
-        .member-search-wrapper {
-          position: relative;
-          flex: 1;
-        }
-
-        .member-search-input {
-          width: 100%;
-          padding: 13px 45px 13px 14px;
-          color: white;
-          background:
-            rgba(1, 8, 16, 0.72);
-          border: 1px solid
-            rgba(255, 255, 255, 0.12);
-          border-radius: 13px;
-          outline: none;
-        }
-
-        .member-search-input:focus {
-          border-color:
-            rgba(42, 159, 255, 0.75);
-          box-shadow: 0 0 0 3px
-            rgba(22, 140, 255, 0.1);
-        }
-
-        .member-search-symbol {
-          position: absolute;
-          top: 50%;
-          right: 14px;
-          color: #668095;
-          transform: translateY(-50%);
-          pointer-events: none;
-        }
-
-        .clear-filter-button {
-          padding: 12px 15px;
-          color: #c9d9e6;
-          background:
-            rgba(255, 255, 255, 0.065);
-          border: 1px solid
-            rgba(255, 255, 255, 0.1);
-          border-radius: 13px;
-          font-weight: 750;
-          cursor: pointer;
-        }
-
-        .clear-filter-button:disabled {
-          opacity: 0.4;
-          cursor: not-allowed;
-        }
-
-        .member-suggestions {
-          position: absolute;
-          z-index: 400;
-          top: calc(100% + 7px);
-          left: 0;
-          right: 0;
-          max-height: 250px;
-          overflow-y: auto;
-          padding: 7px;
-          background: #102033;
-          border: 1px solid
-            rgba(255, 255, 255, 0.13);
-          border-radius: 15px;
-          box-shadow: 0 22px 65px
-            rgba(0, 0, 0, 0.7);
-        }
-
-        .member-suggestion {
-          display: flex;
-          align-items: center;
-          gap: 11px;
-          width: 100%;
-          padding: 11px;
-          color: #dceaf5;
-          background: transparent;
-          border: none;
-          border-radius: 10px;
-          text-align: left;
-          cursor: pointer;
-        }
-
-        .member-suggestion:hover,
-        .member-suggestion.selected {
-          background:
-            rgba(22, 140, 255, 0.17);
-        }
-
-        .member-avatar {
-          display: grid;
-          place-items: center;
-          flex: 0 0 34px;
-          width: 34px;
-          height: 34px;
-          color: #6cdbff;
-          background:
-            rgba(22, 140, 255, 0.12);
-          border-radius: 11px;
-          font-size: 11px;
-          font-weight: 900;
-        }
-
-        .member-suggestion-info {
-          min-width: 0;
-          flex: 1;
-        }
-
-        .member-suggestion-info strong,
-        .member-suggestion-info small {
-          display: block;
-        }
-
-        .member-suggestion-info small {
-          margin-top: 3px;
-          color: #758b9f;
-          font-size: 10px;
-        }
-
-        .active-member-chip {
-          display: flex;
-          align-items: center;
-          gap: 9px;
-          margin-top: 11px;
-          padding: 10px 12px;
-          color: #bfe7ff;
-          background:
-            rgba(22, 140, 255, 0.09);
-          border: 1px solid
-            rgba(22, 140, 255, 0.17);
-          border-radius: 12px;
-          font-size: 12px;
-        }
-
-        .meeting-tabs {
-          display: grid;
-          grid-template-columns: 1fr 1fr;
-          gap: 8px;
-          margin: 0 0 24px;
-          padding: 6px;
-          background: #050b15;
-          border-radius: 20px;
-        }
-
-        .meeting-tab {
-          padding: 15px 10px;
-          color: #8ea2b6;
-          background:
-            rgba(255, 255, 255, 0.035);
-          border: 1px solid transparent;
-          border-radius: 15px;
-          font-weight: 900;
-          cursor: pointer;
-        }
-
-        .meeting-tab.active {
-          color: white;
-          background: linear-gradient(
-            135deg,
-            #188fff,
-            #176ed7
-          );
-          border-color:
-            rgba(126, 205, 255, 0.5);
-          box-shadow: 0 7px 23px
-            rgba(22, 140, 255, 0.32);
-        }
-
-        .points-list {
-          display: flex;
-          flex-direction: column;
-          gap: 12px;
-        }
-
-        .point-card {
-          position: relative;
-          display: flex;
-          align-items: flex-start;
-          gap: 15px;
-          padding: 20px;
-          background: linear-gradient(
-            120deg,
-            rgba(4, 15, 26, 0.84),
-            rgba(17, 22, 54, 0.8)
-          );
-          border: 1px solid
-            rgba(255, 255, 255, 0.09);
-          border-radius: 22px;
-        }
-
-        .point-card.pinned {
-          border-color:
-            rgba(44, 161, 255, 0.6);
-          box-shadow:
-            inset 4px 0 0 #168cff;
-        }
-
-        .point-number {
-          display: grid;
-          place-items: center;
-          flex: 0 0 48px;
-          width: 48px;
-          height: 48px;
-          color: #5fe7f8;
-          background:
-            rgba(16, 193, 222, 0.14);
-          border-radius: 15px;
-          font-size: 21px;
-          font-weight: 900;
-        }
-
-        .point-content {
-          min-width: 0;
-          flex: 1;
-        }
-
-        .point-text {
-          margin: 1px 0 13px;
-          color: #e6f2fc;
-          font-size: 17px;
-          line-height: 1.6;
-          overflow-wrap: anywhere;
-        }
-
-        .point-text.completed {
-          color: #708396;
-          text-decoration: line-through;
-        }
-
-        .pinned-label {
-          display: inline-flex;
-          margin-bottom: 8px;
-          padding: 5px 9px;
-          color: #5db4ff;
-          background:
-            rgba(22, 140, 255, 0.11);
-          border-radius: 999px;
-          font-size: 10px;
-          font-weight: 900;
-        }
-
-        .point-details {
-          display: flex;
-          align-items: center;
-          flex-wrap: wrap;
-          gap: 8px 13px;
-          color: #8297ab;
-          font-size: 13px;
-        }
-
-        .status-button {
-          margin-left: auto;
-          padding: 8px 12px;
-          border: none;
-          border-radius: 999px;
-          font-size: 12px;
-          font-weight: 850;
-          cursor: pointer;
-        }
-
-        .status-button.open {
-          color: #ffc45d;
-          background:
-            rgba(255, 196, 93, 0.12);
-        }
-
-        .status-button.completed {
-          color: #55e5a3;
-          background:
-            rgba(85, 229, 163, 0.12);
-        }
-
-        .menu-wrapper {
-          position: relative;
-          flex: 0 0 auto;
-        }
-
-        .three-dot-button {
-          display: grid;
-          place-items: center;
-          width: 40px;
-          height: 40px;
-          padding: 0;
-          color: #a9bdd0;
-          background:
-            rgba(255, 255, 255, 0.055);
-          border: 1px solid
-            rgba(255, 255, 255, 0.1);
-          border-radius: 12px;
-          font-size: 23px;
-          cursor: pointer;
-        }
-
-        .three-dot-button.open {
-          color: white;
-          background:
-            rgba(22, 140, 255, 0.2);
-          border-color:
-            rgba(66, 175, 255, 0.5);
-        }
-
-        .options-menu {
-          position: absolute;
-          z-index: 200;
-          top: 46px;
-          right: 0;
-          width: 205px;
-          padding: 8px;
-          background: linear-gradient(
-            150deg,
-            #14273a,
-            #0d1928
-          );
-          border: 1px solid
-            rgba(255, 255, 255, 0.13);
-          border-radius: 16px;
-          box-shadow: 0 22px 65px
-            rgba(0, 0, 0, 0.7);
-        }
-
-        .menu-option {
-          display: flex;
-          align-items: center;
-          gap: 11px;
-          width: 100%;
-          padding: 12px;
-          color: #dce9f5;
-          background: transparent;
-          border: none;
-          border-radius: 11px;
-          text-align: left;
-          font-size: 14px;
-          font-weight: 700;
-          cursor: pointer;
-        }
-
-        .menu-option:hover {
-          color: white;
-          background:
-            rgba(22, 140, 255, 0.16);
-        }
-
-        .menu-option.delete {
-          color: #ff9aa7;
-        }
-
-        .menu-option.delete:hover {
-          color: white;
-          background:
-            rgba(225, 57, 80, 0.75);
-        }
-
-        .menu-icon {
-          display: grid;
-          place-items: center;
-          width: 29px;
-          height: 29px;
-          background:
-            rgba(255, 255, 255, 0.065);
-          border-radius: 9px;
-        }
-
-        .menu-separator {
-          height: 1px;
-          margin: 5px 4px;
-          background:
-            rgba(255, 255, 255, 0.08);
-        }
-
-        .edit-textarea,
-        .form-field {
-          width: 100%;
-          padding: 14px 15px;
-          color: white;
-          background:
-            rgba(1, 8, 15, 0.75);
-          border: 1px solid
-            rgba(255, 255, 255, 0.13);
-          border-radius: 14px;
-          outline: none;
-          resize: vertical;
-        }
-
-        .edit-textarea:focus,
-        .form-field:focus {
-          border-color:
-            rgba(22, 140, 255, 0.75);
-          box-shadow: 0 0 0 3px
-            rgba(22, 140, 255, 0.1);
-        }
-
-        .edit-actions {
-          display: flex;
-          gap: 9px;
-          margin-top: 10px;
-        }
-
-        .save-button,
-        .cancel-button {
-          padding: 9px 16px;
-          border: none;
-          border-radius: 10px;
-          font-weight: 800;
-          cursor: pointer;
-        }
-
-        .save-button {
-          color: white;
-          background: #168cff;
-        }
-
-        .cancel-button {
-          color: #c5d2de;
-          background:
-            rgba(255, 255, 255, 0.09);
-        }
-
-        .empty-points {
-          padding: 70px 20px;
-          color: #8195aa;
-          text-align: center;
-          border: 1px dashed
-            rgba(255, 255, 255, 0.14);
-          border-radius: 21px;
-        }
-
-        .empty-points h3 {
-          margin: 0 0 8px;
-          color: #dceaf5;
-        }
-
-        .empty-points p {
-          margin: 0;
-        }
-
-        .modal-background {
-          position: fixed;
-          inset: 0;
-          z-index: 1000;
-          display: grid;
-          place-items: center;
-          padding: 20px;
-          background:
-            rgba(1, 5, 10, 0.88);
-          backdrop-filter: blur(9px);
-        }
-
-        .modal-box {
-          width: 100%;
-          max-width: 560px;
-          padding: 26px;
-          color: #edf7ff;
-          background: linear-gradient(
-            145deg,
-            #0e1e2e,
-            #091421
-          );
-          border: 1px solid
-            rgba(255, 255, 255, 0.13);
-          border-radius: 25px;
-          box-shadow: 0 35px 110px
-            rgba(0, 0, 0, 0.75);
-        }
-
-        .modal-header {
-          display: flex;
-          align-items: flex-start;
-          justify-content: space-between;
-          gap: 20px;
-        }
-
-        .modal-header h2 {
-          margin: 8px 0 0;
-        }
-
-        .close-button {
-          width: 42px;
-          height: 42px;
-          padding: 0;
-          color: white;
-          background:
-            rgba(255, 255, 255, 0.07);
-          border: 1px solid
-            rgba(255, 255, 255, 0.09);
-          border-radius: 12px;
-          font-size: 24px;
-          cursor: pointer;
-        }
-
-        .form-label {
-          display: block;
-          margin: 20px 0 8px;
-          color: #bdcad6;
-          font-size: 14px;
-        }
-
-        .form-help {
-          margin: 9px 0 0;
-          color: #75899c;
-          font-size: 12px;
-          line-height: 1.5;
-        }
-
-        .modal-submit {
-          width: 100%;
-          margin-top: 20px;
-        }
-
-        @media (max-width: 950px) {
-          .mom-page {
-            padding: 20px;
-          }
-
-          .top-header {
-            align-items: flex-start;
-            flex-direction: column;
-          }
-
-          .top-header .primary-button {
-            width: 100%;
-          }
-
-          .stats-grid {
-            grid-template-columns: repeat(
-              2,
-              minmax(0, 1fr)
-            );
-          }
-
-          .meeting-layout {
-            grid-template-columns: 1fr;
-          }
-        }
-
-        @media (max-width: 600px) {
-          .mom-page {
-            padding: 14px;
-          }
-
-          .main-title {
-            font-size: 39px;
-          }
-
-          .meeting-panel {
-            padding: 17px;
-          }
-
-          .meeting-header {
-            align-items: flex-start;
-            flex-direction: column;
-          }
-
-          .add-point-button {
-            width: 100%;
-          }
-
-          .member-filter-heading {
-            align-items: flex-start;
-            flex-direction: column;
-          }
-
-          .member-search-row {
-            flex-direction: column;
-          }
-
-          .clear-filter-button {
-            width: 100%;
-          }
-
-          .meeting-tab {
-            padding: 13px 5px;
-            font-size: 12px;
-          }
-
-          .point-card {
-            gap: 11px;
-            padding: 15px;
-          }
-
-          .point-number {
-            flex-basis: 42px;
-            width: 42px;
-            height: 42px;
-          }
-
-          .point-details {
-            align-items: flex-start;
-            flex-direction: column;
-          }
-
-          .status-button {
-            margin-left: 0;
-          }
-
-          .options-menu {
-            width: 190px;
-          }
-        }
+        *{box-sizing:border-box}html,body{margin:0;background:#06101d;color:#eef7ff;font-family:Inter,"Segoe UI",Arial,sans-serif}button,input,select,textarea{font:inherit}.page{min-height:100vh;padding:28px;background:radial-gradient(circle at 7% 3%,rgba(0,194,229,.22),transparent 27%),radial-gradient(circle at 95% 20%,rgba(113,76,235,.25),transparent 30%),#06101d}.container{max-width:1500px;margin:auto}.header{display:flex;justify-content:space-between;gap:18px;align-items:flex-start;margin-bottom:20px}.eyebrow{color:#5ee8fa;font-size:12px;font-weight:900;letter-spacing:2px}.title{font-size:clamp(38px,5vw,66px);margin:8px 0}.title span{color:#63a9ff}.muted{color:#91a6ba}.actions{display:flex;gap:9px;flex-wrap:wrap}.btn{padding:12px 16px;border:1px solid rgba(255,255,255,.13);border-radius:13px;background:rgba(255,255,255,.07);color:white;font-weight:800;cursor:pointer}.btn.primary{background:linear-gradient(135deg,#159cf0,#6870f4)}.btn.danger{color:#ff9da8}.menu-wrap{position:relative}.dots{width:38px;height:38px;padding:0;font-size:22px}.menu{position:absolute;z-index:50;top:43px;right:0;width:190px;padding:7px;border:1px solid rgba(255,255,255,.13);border-radius:14px;background:#102033;box-shadow:0 18px 45px rgba(0,0,0,.55)}.menu button{display:block;width:100%;padding:10px 11px;border:0;border-radius:9px;background:transparent;color:#e8f3fc;text-align:left;cursor:pointer}.menu button:hover{background:rgba(22,140,255,.17)}.menu button.danger{color:#ff9da8}.menu button.danger:hover{color:white;background:rgba(225,57,80,.7)}.stats{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:12px;margin-bottom:18px}.stat{padding:17px;border:1px solid rgba(255,255,255,.1);border-radius:19px;background:rgba(255,255,255,.05)}.stat small{color:#8ca1b5;font-weight:800}.stat strong{display:block;margin-top:8px;font-size:25px}.layout{display:grid;grid-template-columns:330px minmax(0,1fr);gap:16px}.panel{border:1px solid rgba(255,255,255,.11);border-radius:23px;background:rgba(255,255,255,.05);padding:19px}.search{width:100%;padding:13px;color:white;background:#050d18;border:1px solid rgba(255,255,255,.12);border-radius:12px;outline:none}.history{display:flex;flex-direction:column;gap:9px;margin-top:12px}.history-card{display:flex;gap:8px;padding:13px;border:1px solid rgba(255,255,255,.08);border-radius:15px;background:rgba(255,255,255,.025)}.history-card.active{border-color:#329fff;background:rgba(22,140,255,.14)}.history-main{flex:1;background:none;border:0;color:white;text-align:left;cursor:pointer}.tiny{padding:7px 9px}.meeting-head{display:flex;justify-content:space-between;align-items:center;gap:12px}.toolbar{display:grid;grid-template-columns:2fr repeat(4,1fr);gap:8px;margin:18px 0}.tabs{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;padding:6px;background:#050b15;border-radius:17px;margin-bottom:17px}.tab{padding:13px;border:0;border-radius:12px;background:rgba(255,255,255,.04);color:#91a5b8;font-weight:900;cursor:pointer}.tab.active{color:white;background:#168cff}.point-list{display:flex;flex-direction:column;gap:11px}.point{display:grid;grid-template-columns:44px 1fr auto;gap:13px;padding:17px;background:rgba(4,15,26,.82);border:1px solid rgba(255,255,255,.09);border-radius:18px}.number{display:grid;place-items:center;width:44px;height:44px;border-radius:13px;background:rgba(16,193,222,.14);color:#5fe7f8;font-weight:900}.point h3{margin:0 0 9px;font-size:16px;line-height:1.5}.point.completed h3{text-decoration:line-through;color:#71869a}.meta{display:flex;gap:9px;flex-wrap:wrap;color:#8499ad;font-size:12px}.chip{padding:5px 8px;border-radius:999px;background:rgba(22,140,255,.12);color:#77c9ff}.chip.overdue{background:rgba(255,70,91,.14);color:#ff929f}.chip.today{background:rgba(255,181,71,.14);color:#ffc361}.chip.soon{background:rgba(177,118,255,.15);color:#c49bff}.attendance-form{display:flex;gap:8px;margin-bottom:14px}.attendance-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.attendance{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:13px;border:1px solid rgba(255,255,255,.09);border-radius:14px}.modal-bg{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:18px;background:rgba(1,5,10,.88)}.modal{width:100%;max-width:570px;padding:24px;border:1px solid rgba(255,255,255,.14);border-radius:22px;background:#0d1b2a}.modal h2{margin-top:0}.field{width:100%;padding:13px;margin:6px 0 13px;color:white;background:#050d18;border:1px solid rgba(255,255,255,.13);border-radius:12px}.empty{padding:55px;text-align:center;color:#8398ab;border:1px dashed rgba(255,255,255,.14);border-radius:17px}.empty-page{min-height:100vh;display:grid;place-items:center;background:#06101d;color:white}.empty-page button{padding:12px}.alert-bar{margin-bottom:14px;padding:13px;border:1px solid rgba(255,190,73,.25);border-radius:14px;background:rgba(255,190,73,.08);color:#ffd78b}@media(max-width:1100px){.stats{grid-template-columns:repeat(3,1fr)}.layout{grid-template-columns:1fr}.toolbar{grid-template-columns:1fr 1fr}}@media(max-width:650px){.page{padding:13px}.header,.meeting-head{flex-direction:column}.stats{grid-template-columns:repeat(2,1fr)}.toolbar{grid-template-columns:1fr}.attendance-list{grid-template-columns:1fr}.point{grid-template-columns:38px 1fr}.point>.actions{grid-column:1/-1}.tabs{font-size:11px}}
       `}</style>
+      <div className="container">
+        <header className="header">
+          <div>
+            <div className="eyebrow">MOM MEETING HUB</div>
+            <h1 className="title">Meet. Decide. <span>Deliver.</span></h1>
+            <p className="muted">Shared meetings, attendance, responsibility, deadlines, reminders and automatic reports.</p>
+          </div>
+          <div className="actions">
+            <button className="btn" onClick={showReminder}>🔔 Reminders</button>
+            <button className="btn" onClick={enableNotifications}>
+              {notificationPermission === "granted" ? "Notifications On" : "Enable Notifications"}
+            </button>
+            <button className="btn" onClick={generateReport}>📝 Generate Report</button>
+            <button className="btn primary" onClick={openCreateMeeting}>+ Create TBM</button>
+          </div>
+        </header>
 
-      <div
-        className="mom-page"
-        onClick={(event) => {
-          const element =
-            event.target as HTMLElement;
+        {(overdueActions.length > 0 || dueSoonActions.length > 0) && (
+          <div className="alert-bar">
+            ⚠ {overdueActions.length} overdue action(s), {dueSoonActions.length} due today/soon.
+          </div>
+        )}
 
-          if (
-            !element.closest(
-              ".menu-wrapper"
-            )
-          ) {
-            closeEveryMenu();
-          }
+        <section className="stats">
+          <div className="stat"><small>TBMS</small><strong>{meetings.length}</strong></div>
+          <div className="stat"><small>OPEN ACTIONS</small><strong>{openActions.length}</strong></div>
+          <div className="stat"><small>OVERDUE</small><strong>{overdueActions.length}</strong></div>
+          <div className="stat"><small>DUE SOON</small><strong>{dueSoonActions.length}</strong></div>
+          <div className="stat"><small>ATTENDANCE</small><strong>{selectedMeeting.attendance.filter((p) => p.status === "Present").length}</strong></div>
+          <div className="stat"><small>{role.toUpperCase()}</small><strong>{syncStatus}</strong></div>
+        </section>
 
-          if (
-            !element.closest(
-              ".member-search-wrapper"
-            )
-          ) {
-            setShowMemberSuggestions(
-              false
-            );
-          }
-        }}
-      >
-        <div className="mom-container">
-          <header className="top-header">
-            <div>
-              <p className="eyebrow">
-                MOM MEETING HUB
-              </p>
+        <section className="layout">
+          <aside className="panel">
+            <h2>TBM History</h2>
+            <input className="search" placeholder="Search everything" value={search} onChange={(e) => setSearch(e.target.value)} />
+            <div className="history">
+              {filteredMeetings.map((meeting) => (
+                <div className={`history-card ${meeting.id === selectedMeetingId ? "active" : ""}`} key={meeting.id}>
+                  <button className="history-main" onClick={() => { setSelectedMeetingId(meeting.id); setActiveTab("information"); }}>
+                    <strong>{meeting.pinned ? "📌 " : ""}{meeting.name}</strong><br />
+                    <small className="muted">{formatDate(meeting.date)} · {meeting.information.length + meeting.action.length} points</small>
+                  </button>
+                  <div className="menu-wrap">
+                    <button className="btn dots" onClick={() => { setOpenPointMenuId(null); setOpenMeetingMenuId((current) => current === meeting.id ? null : meeting.id); }}>⋮</button>
+                    {openMeetingMenuId === meeting.id && (
+                      <div className="menu">
+                        <button onClick={() => { openEditMeeting(meeting); setOpenMeetingMenuId(null); }}>✎ Edit meeting</button>
+                        <button onClick={() => { setMeetings((current) => current.map((item) => item.id === meeting.id ? { ...item, pinned: !item.pinned } : item)); setOpenMeetingMenuId(null); }}>{meeting.pinned ? "📌 Unpin meeting" : "📌 Pin meeting"}</button>
+                        {canDeleteMeeting && <button className="danger" onClick={() => { deleteMeeting(meeting.id); setOpenMeetingMenuId(null); }}>🗑 Delete meeting</button>}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </aside>
 
-              <h1 className="main-title">
-                Meet. Decide.
-                <span> Deliver.</span>
-              </h1>
-
-              <p className="description">
-                Create date-wise TBMs,
-                review previous meeting
-                discussions and track every
-                Information and Action point.
-              </p>
+          <section className="panel">
+            <div className="meeting-head">
+              <div><h2>{selectedMeeting.name}</h2><p className="muted">📅 {formatDate(selectedMeeting.date)}</p></div>
+              <div className="actions">
+                <button className="btn" onClick={() => updateSelectedMeeting((meeting) => ({ ...meeting, pinned: !meeting.pinned }))}>{selectedMeeting.pinned ? "Unpin" : "Pin TBM"}</button>
+                {activeTab !== "attendance" && <button className="btn primary" onClick={openNewPoint}>+ Add Point</button>}
+              </div>
             </div>
 
-            {canModify && (
-              <button
-                className="primary-button"
-                onClick={openNewMeetingModal}
-              >
-                + Create New TBM
-              </button>
+            <div className="toolbar">
+              <input className="search" placeholder="Search points, member, responsible..." value={search} onChange={(e) => setSearch(e.target.value)} />
+              <select className="search" value={memberFilter} onChange={(e) => setMemberFilter(e.target.value)}><option value="">All creators</option>{teamMembers.map((name) => <option key={name}>{name}</option>)}</select>
+              <select className="search" value={responsibleFilter} onChange={(e) => setResponsibleFilter(e.target.value)}><option value="">All responsible</option>{teamMembers.map((name) => <option key={name}>{name}</option>)}</select>
+              <select className="search" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}><option value="all">All status</option><option value="Open">Open</option><option value="Completed">Completed</option></select>
+              <select className="search" value={dueFilter} onChange={(e) => setDueFilter(e.target.value)}><option value="all">All due dates</option><option value="overdue">Overdue</option><option value="today">Due today</option><option value="soon">Due soon</option></select>
+            </div>
+
+            <div className="tabs">
+              {(["information", "action", "attendance"] as ActiveTab[]).map((tab) => (
+                <button key={tab} className={`tab ${activeTab === tab ? "active" : ""}`} onClick={() => setActiveTab(tab)}>{tab.toUpperCase()} ({tab === "information" ? selectedMeeting.information.length : tab === "action" ? selectedMeeting.action.length : selectedMeeting.attendance.length})</button>
+              ))}
+            </div>
+
+            {activeTab === "attendance" ? (
+              <div>
+                <div className="attendance-form"><select className="search" value={attendanceProfileId} onChange={(e) => setAttendanceProfileId(e.target.value)}><option value="">Select registered team member</option>{teamProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.full_name?.trim() || profile.email?.split("@")[0] || "Team Member"}{profile.email ? ` (${profile.email})` : ""}</option>)}</select><button className="btn primary" onClick={addAttendance}>Add Member</button></div>
+                <div className="attendance-list">
+                  {selectedMeeting.attendance.map((person) => (
+                    <div className="attendance" key={person.id}><strong>{person.name}</strong><div className="actions"><select className="search" value={person.status} onChange={(e) => updateAttendance(person.id, e.target.value as AttendanceStatus)}><option>Present</option><option>Absent</option></select>{canDeletePoint && <button className="btn danger" onClick={() => removeAttendance(person.id)}>Remove</button>}</div></div>
+                  ))}
+                </div>
+              </div>
+            ) : displayedPoints.length === 0 ? (
+              <div className="empty">No matching {activeTab} points.</div>
+            ) : (
+              <div className="point-list">
+                {displayedPoints.map((point, index) => {
+                  const due = dueState(point);
+                  return (
+                    <article className={`point ${point.status === "Completed" ? "completed" : ""}`} key={point.id}>
+                      <div className="number">{index + 1}</div>
+                      <div><h3>{point.pinned ? "📌 " : ""}{point.text}</h3><div className="meta"><span>Added by <strong>{point.addedBy}</strong></span><span>{point.addedAt}</span>{activeTab === "action" && <><span className="chip">👤 {point.responsiblePerson || "Unassigned"}</span><span className={`chip ${due}`}>📅 {formatDate(point.dueDate || "")}</span><span className="chip">{point.status}</span></>}</div></div>
+                      <div className="menu-wrap">
+                        <button className="btn dots" onClick={() => { setOpenMeetingMenuId(null); setOpenPointMenuId((current) => current === point.id ? null : point.id); }}>⋮</button>
+                        {openPointMenuId === point.id && (
+                          <div className="menu">
+                            <button onClick={() => { openEditPoint(point); setOpenPointMenuId(null); }}>✎ Edit point</button>
+                            <button onClick={() => { mutatePoint(point.id, (item) => ({ ...item, pinned: !item.pinned })); setOpenPointMenuId(null); }}>{point.pinned ? "📌 Unpin point" : "📌 Pin point"}</button>
+                            {activeTab === "action" && <button onClick={() => { mutatePoint(point.id, (item) => ({ ...item, status: item.status === "Completed" ? "Open" : "Completed" })); setOpenPointMenuId(null); }}>{point.status === "Completed" ? "↻ Reopen action" : "✓ Complete action"}</button>}
+                            {canDeletePoint && <button className="danger" onClick={() => { deletePoint(point.id); setOpenPointMenuId(null); }}>🗑 Delete point</button>}
+                          </div>
+                        )}
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
             )}
-          </header>
-
-          <section className="stats-grid">
-            <div className="stat-card">
-              <p>TOTAL TBMS</p>
-              <h2>{meetings.length}</h2>
-            </div>
-
-            <div className="stat-card">
-              <p>ALL POINTS</p>
-              <h2>{totalPoints}</h2>
-            </div>
-
-            <div className="stat-card">
-              <p>OPEN ACTIONS</p>
-              <h2>{openActions}</h2>
-            </div>
-
-            <div className="stat-card">
-              <p>DATA STATUS</p>
-              <h2 className="saved-text">
-                {syncStatus}
-              </h2>
-              <small>{role.toUpperCase()}</small>
-            </div>
           </section>
-
-          <section className="meeting-layout">
-            <aside className="panel history-panel">
-              <div className="history-heading">
-                <h2>TBM History</h2>
-                <span>Date-wise</span>
-              </div>
-
-              <input
-                className="search-input"
-                type="text"
-                placeholder="Search TBM or date"
-                value={searchText}
-                onChange={(event) =>
-                  setSearchText(
-                    event.target.value
-                  )
-                }
-              />
-
-              <div className="history-list">
-                {filteredMeetings.map(
-                  (meeting) => (
-                    <div
-                      className={`meeting-history-card ${
-                        meeting.id ===
-                        selectedMeetingId
-                          ? "selected"
-                          : ""
-                      } ${
-                        meeting.pinned
-                          ? "pinned"
-                          : ""
-                      }`}
-                      key={meeting.id}
-                    >
-                      <button
-                        className="meeting-history-main"
-                        onClick={() =>
-                          selectMeeting(
-                            meeting.id
-                          )
-                        }
-                      >
-                        {meeting.pinned && (
-                          <span className="history-pin-label">
-                            📌 PINNED
-                          </span>
-                        )}
-
-                        <strong>
-                          {meeting.name}
-                        </strong>
-
-                        <small>
-                          {formatDate(
-                            meeting.date
-                          )}
-                        </small>
-
-                        <small>
-                          {meeting.information
-                            .length +
-                            meeting.action
-                              .length}{" "}
-                          total points
-                        </small>
-                      </button>
-
-                      {canModify && (
-                      <div className="menu-wrapper">
-                        <button
-                          className={`three-dot-button ${
-                            openMeetingMenuId ===
-                            meeting.id
-                              ? "open"
-                              : ""
-                          }`}
-                          onClick={(event) => {
-                            event.stopPropagation();
-
-                            toggleMeetingMenu(
-                              meeting.id
-                            );
-                          }}
-                        >
-                          ⋮
-                        </button>
-
-                        {openMeetingMenuId ===
-                          meeting.id && (
-                          <div
-                            className="options-menu"
-                            onClick={(event) =>
-                              event.stopPropagation()
-                            }
-                          >
-                            <button
-                              className="menu-option"
-                              onClick={() =>
-                                openEditMeetingModal(
-                                  meeting
-                                )
-                              }
-                            >
-                              <span className="menu-icon">
-                                ✎
-                              </span>
-                              <span>
-                                Edit meeting
-                              </span>
-                            </button>
-
-                            <button
-                              className="menu-option"
-                              onClick={() =>
-                                togglePinMeeting(
-                                  meeting.id
-                                )
-                              }
-                            >
-                              <span className="menu-icon">
-                                📌
-                              </span>
-                              <span>
-                                {meeting.pinned
-                                  ? "Unpin meeting"
-                                  : "Pin to top"}
-                              </span>
-                            </button>
-
-                            <div className="menu-separator" />
-
-                            <button
-                              className="menu-option delete"
-                              onClick={() =>
-                                deleteMeeting(
-                                  meeting.id
-                                )
-                              }
-                            >
-                              <span className="menu-icon">
-                                🗑
-                              </span>
-                              <span>
-                                Delete meeting
-                              </span>
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                      )}
-                    </div>
-                  )
-                )}
-              </div>
-            </aside>
-
-            <main className="panel meeting-panel">
-              <div className="meeting-header">
-                <div>
-                  <h2>
-                    {selectedMeeting.name}
-                  </h2>
-
-                  <p className="meeting-date">
-                    📅{" "}
-                    {formatDate(
-                      selectedMeeting.date
-                    )}
-                  </p>
-                </div>
-
-                {canModify && (
-                  <button
-                    className="add-point-button"
-                    onClick={openPointModal}
-                  >
-                    + Add Point
-                  </button>
-                )}
-              </div>
-
-              <section className="member-filter">
-                <div className="member-filter-heading">
-                  <div className="member-filter-title">
-                    <span className="member-filter-icon">
-                      TM
-                    </span>
-
-                    <div>
-                      <strong>
-                        Team Member Filter
-                      </strong>
-
-                      <small>
-                        Filter points by the
-                        member who added them
-                      </small>
-                    </div>
-                  </div>
-
-                  <span className="member-result-count">
-                    {memberFilter
-                      ? `${filteredMemberTotal} matching points`
-                      : `${teamMembers.length} team members`}
-                  </span>
-                </div>
-
-                <div className="member-search-row">
-                  <div className="member-search-wrapper">
-                    <input
-                      className="member-search-input"
-                      type="text"
-                      placeholder="Type or select a team member"
-                      value={memberFilter}
-                      autoComplete="off"
-                      onFocus={() =>
-                        setShowMemberSuggestions(
-                          true
-                        )
-                      }
-                      onChange={(event) => {
-                        setMemberFilter(
-                          event.target.value
-                        );
-
-                        setShowMemberSuggestions(
-                          true
-                        );
-                      }}
-                    />
-
-                    <span className="member-search-symbol">
-                      ⌕
-                    </span>
-
-                    {showMemberSuggestions && (
-                      <div className="member-suggestions">
-                        <button
-                          className={`member-suggestion ${
-                            !memberFilter
-                              ? "selected"
-                              : ""
-                          }`}
-                          onClick={
-                            clearMemberFilter
-                          }
-                        >
-                          <span className="member-avatar">
-                            ALL
-                          </span>
-
-                          <span className="member-suggestion-info">
-                            <strong>
-                              All Team Members
-                            </strong>
-
-                            <small>
-                              Show every point
-                            </small>
-                          </span>
-                        </button>
-
-                        {filteredMemberSuggestions.map(
-                          (name) => {
-                            const memberPointCount =
-                              [
-                                ...selectedMeeting.information,
-                                ...selectedMeeting.action,
-                              ].filter(
-                                (point) =>
-                                  normalizeText(
-                                    point.addedBy
-                                  ) ===
-                                  normalizeText(
-                                    name
-                                  )
-                              ).length;
-
-                            return (
-                              <button
-                                className={`member-suggestion ${
-                                  normalizeText(
-                                    memberFilter
-                                  ) ===
-                                  normalizeText(
-                                    name
-                                  )
-                                    ? "selected"
-                                    : ""
-                                }`}
-                                key={name}
-                                onClick={() =>
-                                  selectTeamMember(
-                                    name
-                                  )
-                                }
-                              >
-                                <span className="member-avatar">
-                                  {getInitials(
-                                    name
-                                  )}
-                                </span>
-
-                                <span className="member-suggestion-info">
-                                  <strong>
-                                    {name}
-                                  </strong>
-
-                                  <small>
-                                    {
-                                      memberPointCount
-                                    }{" "}
-                                    added points
-                                  </small>
-                                </span>
-                              </button>
-                            );
-                          }
-                        )}
-
-                        {filteredMemberSuggestions.length ===
-                          0 && (
-                          <div className="member-suggestion">
-                            <span className="member-suggestion-info">
-                              <strong>
-                                No matching member
-                              </strong>
-
-                              <small>
-                                Try another name
-                              </small>
-                            </span>
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-
-                  <button
-                    className="clear-filter-button"
-                    disabled={!memberFilter}
-                    onClick={
-                      clearMemberFilter
-                    }
-                  >
-                    Clear Filter
-                  </button>
-                </div>
-
-                {memberFilter && (
-                  <div className="active-member-chip">
-                    <span className="member-avatar">
-                      {getInitials(
-                        selectedMemberName
-                      )}
-                    </span>
-
-                    <span>
-                      Showing points added by{" "}
-                      <strong>
-                        {selectedMemberName}
-                      </strong>
-                      . Information:{" "}
-                      {
-                        filteredInformationPoints.length
-                      }
-                      , Action:{" "}
-                      {
-                        filteredActionPoints.length
-                      }
-                    </span>
-                  </div>
-                )}
-              </section>
-
-              <div className="meeting-tabs">
-                <button
-                  className={`meeting-tab ${
-                    activeTab ===
-                    "information"
-                      ? "active"
-                      : ""
-                  }`}
-                  onClick={() =>
-                    changeTab(
-                      "information"
-                    )
-                  }
-                >
-                  INFORMATION (
-                  {
-                    filteredInformationPoints.length
-                  }
-                  )
-                </button>
-
-                <button
-                  className={`meeting-tab ${
-                    activeTab === "action"
-                      ? "active"
-                      : ""
-                  }`}
-                  onClick={() =>
-                    changeTab("action")
-                  }
-                >
-                  ACTION (
-                  {
-                    filteredActionPoints.length
-                  }
-                  )
-                </button>
-              </div>
-
-              <div className="points-list">
-                {displayedPoints.length ===
-                0 ? (
-                  <div className="empty-points">
-                    <h3>
-                      No {activeTab} points
-                      found
-                    </h3>
-
-                    <p>
-                      {memberFilter
-                        ? `No ${activeTab} points were added by ${selectedMemberName}.`
-                        : "Click Add Point to add the first meeting point."}
-                    </p>
-                  </div>
-                ) : (
-                  displayedPoints.map(
-                    (
-                      meetingPoint,
-                      index
-                    ) => (
-                      <article
-                        className={`point-card ${
-                          meetingPoint.pinned
-                            ? "pinned"
-                            : ""
-                        }`}
-                        key={meetingPoint.id}
-                      >
-                        <div className="point-number">
-                          {index + 1}
-                        </div>
-
-                        <div className="point-content">
-                          {meetingPoint.pinned && (
-                            <div className="pinned-label">
-                              📌 PINNED TO TOP
-                            </div>
-                          )}
-
-                          {editingPointId ===
-                          meetingPoint.id ? (
-                            <div>
-                              <textarea
-                                className="edit-textarea"
-                                rows={4}
-                                value={
-                                  editPointText
-                                }
-                                onChange={(
-                                  event
-                                ) =>
-                                  setEditPointText(
-                                    event.target
-                                      .value
-                                  )
-                                }
-                              />
-
-                              <div className="edit-actions">
-                                <button
-                                  className="save-button"
-                                  onClick={() =>
-                                    saveEditedPoint(
-                                      meetingPoint.id
-                                    )
-                                  }
-                                >
-                                  Save changes
-                                </button>
-
-                                <button
-                                  className="cancel-button"
-                                  onClick={
-                                    cancelEditingPoint
-                                  }
-                                >
-                                  Cancel
-                                </button>
-                              </div>
-                            </div>
-                          ) : (
-                            <p
-                              className={`point-text ${
-                                meetingPoint.status ===
-                                "Completed"
-                                  ? "completed"
-                                  : ""
-                              }`}
-                            >
-                              {
-                                meetingPoint.text
-                              }
-                            </p>
-                          )}
-
-                          <div className="point-details">
-                            <span>
-                              Added by{" "}
-                              <strong>
-                                {
-                                  meetingPoint.addedBy
-                                }
-                              </strong>
-                            </span>
-
-                            <span>
-                              {
-                                meetingPoint.addedAt
-                              }
-                            </span>
-
-                            {activeTab ===
-                              "action" &&
-                              meetingPoint.status && (
-                                <button
-                                  className={`status-button ${
-                                    meetingPoint.status ===
-                                    "Completed"
-                                      ? "completed"
-                                      : "open"
-                                  }`}
-                                  disabled={!canModify}
-                                  onClick={() =>
-                                    changeActionStatus(
-                                      meetingPoint.id
-                                    )
-                                  }
-                                >
-                                  {
-                                    meetingPoint.status
-                                  }
-                                </button>
-                              )}
-                          </div>
-                        </div>
-
-                        {canModify && (
-                        <div className="menu-wrapper">
-                          <button
-                            className={`three-dot-button ${
-                              openPointMenuId ===
-                              meetingPoint.id
-                                ? "open"
-                                : ""
-                            }`}
-                            onClick={(event) => {
-                              event.stopPropagation();
-
-                              togglePointMenu(
-                                meetingPoint.id
-                              );
-                            }}
-                          >
-                            ⋮
-                          </button>
-
-                          {openPointMenuId ===
-                            meetingPoint.id && (
-                            <div
-                              className="options-menu"
-                              onClick={(event) =>
-                                event.stopPropagation()
-                              }
-                            >
-                              <button
-                                className="menu-option"
-                                onClick={() =>
-                                  startEditingPoint(
-                                    meetingPoint.id,
-                                    meetingPoint.text
-                                  )
-                                }
-                              >
-                                <span className="menu-icon">
-                                  ✎
-                                </span>
-                                <span>
-                                  Edit point
-                                </span>
-                              </button>
-
-                              <button
-                                className="menu-option"
-                                onClick={() =>
-                                  togglePinPoint(
-                                    meetingPoint.id
-                                  )
-                                }
-                              >
-                                <span className="menu-icon">
-                                  📌
-                                </span>
-                                <span>
-                                  {meetingPoint.pinned
-                                    ? "Unpin point"
-                                    : "Pin to top"}
-                                </span>
-                              </button>
-
-                              <div className="menu-separator" />
-
-                              <button
-                                className="menu-option delete"
-                                onClick={() =>
-                                  deletePoint(
-                                    meetingPoint.id
-                                  )
-                                }
-                              >
-                                <span className="menu-icon">
-                                  🗑
-                                </span>
-                                <span>
-                                  Delete point
-                                </span>
-                              </button>
-                            </div>
-                          )}
-                        </div>
-                        )}
-                      </article>
-                    )
-                  )
-                )}
-              </div>
-            </main>
-          </section>
-        </div>
-
-        {showNewMeetingModal && (
-          <div
-            className="modal-background"
-            onMouseDown={(event) => {
-              if (
-                event.target ===
-                event.currentTarget
-              ) {
-                closeNewMeetingModal();
-              }
-            }}
-          >
-            <div className="modal-box">
-              <div className="modal-header">
-                <div>
-                  <p className="eyebrow">
-                    NEW MEETING
-                  </p>
-                  <h2>
-                    Create New TBM
-                  </h2>
-                </div>
-
-                <button
-                  className="close-button"
-                  onClick={
-                    closeNewMeetingModal
-                  }
-                >
-                  ×
-                </button>
-              </div>
-
-              <label className="form-label">
-                TBM Name or Meeting
-                Title
-              </label>
-
-              <input
-                className="form-field"
-                type="text"
-                placeholder="Optional meeting title"
-                value={newMeetingName}
-                onChange={(event) =>
-                  setNewMeetingName(
-                    event.target.value
-                  )
-                }
-              />
-
-              <p className="form-help">
-                Leave the name empty to
-                use the next automatic
-                serial name.
-              </p>
-
-              <label className="form-label">
-                Meeting Date
-              </label>
-
-              <input
-                className="form-field"
-                type="date"
-                value={newMeetingDate}
-                onChange={(event) =>
-                  setNewMeetingDate(
-                    event.target.value
-                  )
-                }
-              />
-
-              <button
-                className="primary-button modal-submit"
-                onClick={
-                  createNewMeeting
-                }
-              >
-                Create TBM
-              </button>
-            </div>
-          </div>
-        )}
-
-        {showEditMeetingModal && (
-          <div
-            className="modal-background"
-            onMouseDown={(event) => {
-              if (
-                event.target ===
-                event.currentTarget
-              ) {
-                closeEditMeetingModal();
-              }
-            }}
-          >
-            <div className="modal-box">
-              <div className="modal-header">
-                <div>
-                  <p className="eyebrow">
-                    EDIT MEETING
-                  </p>
-                  <h2>
-                    Edit TBM Details
-                  </h2>
-                </div>
-
-                <button
-                  className="close-button"
-                  onClick={
-                    closeEditMeetingModal
-                  }
-                >
-                  ×
-                </button>
-              </div>
-
-              <label className="form-label">
-                TBM Name or Meeting
-                Title
-              </label>
-
-              <input
-                className="form-field"
-                type="text"
-                value={editMeetingName}
-                onChange={(event) =>
-                  setEditMeetingName(
-                    event.target.value
-                  )
-                }
-              />
-
-              <label className="form-label">
-                Meeting Date
-              </label>
-
-              <input
-                className="form-field"
-                type="date"
-                value={editMeetingDate}
-                onChange={(event) =>
-                  setEditMeetingDate(
-                    event.target.value
-                  )
-                }
-              />
-
-              <button
-                className="primary-button modal-submit"
-                onClick={
-                  saveEditedMeeting
-                }
-              >
-                Save Meeting Changes
-              </button>
-            </div>
-          </div>
-        )}
-
-        {showPointModal && (
-          <div
-            className="modal-background"
-            onMouseDown={(event) => {
-              if (
-                event.target ===
-                event.currentTarget
-              ) {
-                closePointModal();
-              }
-            }}
-          >
-            <div className="modal-box">
-              <div className="modal-header">
-                <div>
-                  <p className="eyebrow">
-                    {selectedMeeting.name}
-                  </p>
-
-                  <h2>
-                    Add{" "}
-                    {activeTab ===
-                    "information"
-                      ? "Information"
-                      : "Action"}{" "}
-                    Point
-                  </h2>
-                </div>
-
-                <button
-                  className="close-button"
-                  onClick={closePointModal}
-                >
-                  ×
-                </button>
-              </div>
-
-              <label className="form-label">
-                Member Name
-              </label>
-
-              <input
-                className="form-field"
-                type="text"
-                placeholder="Enter your name"
-                value={memberName}
-                onChange={(event) =>
-                  setMemberName(
-                    event.target.value
-                  )
-                }
-              />
-
-              <label className="form-label">
-                Point Details
-              </label>
-
-              <textarea
-                className="form-field"
-                rows={5}
-                placeholder="What was discussed in the meeting?"
-                value={pointText}
-                onChange={(event) =>
-                  setPointText(
-                    event.target.value
-                  )
-                }
-              />
-
-              <button
-                className="primary-button modal-submit"
-                onClick={addNewPoint}
-              >
-                Publish Point
-              </button>
-            </div>
-          </div>
-        )}
+        </section>
       </div>
-    </>
+
+      {meetingModal && <div className="modal-bg" onMouseDown={(e) => e.target === e.currentTarget && setMeetingModal(false)}><div className="modal"><h2>{editMeetingId ? "Edit TBM" : "Create TBM"}</h2><label>Meeting title</label><input className="field" value={meetingName} onChange={(e) => setMeetingName(e.target.value)} placeholder="Optional title" /><label>Meeting date</label><input className="field" type="date" value={meetingDate} onChange={(e) => setMeetingDate(e.target.value)} /><div className="actions"><button className="btn" onClick={() => setMeetingModal(false)}>Cancel</button><button className="btn primary" onClick={saveMeeting}>Save</button></div></div></div>}
+
+      {pointModal && <div className="modal-bg" onMouseDown={(e) => e.target === e.currentTarget && setPointModal(false)}><div className="modal"><h2>{editingPointId ? "Edit" : "Add"} {activeTab === "action" ? "Action" : "Information"} Point</h2><label>Added by</label><input className="field" list="team-members" value={addedBy} onChange={(e) => setAddedBy(e.target.value)} /><datalist id="team-members">{teamMembers.map((name) => <option key={name} value={name} />)}</datalist><label>Point details</label><textarea className="field" rows={5} value={pointText} onChange={(e) => setPointText(e.target.value)} />{activeTab === "action" && <><label>Responsible person</label><input className="field" list="team-members" value={responsiblePerson} onChange={(e) => setResponsiblePerson(e.target.value)} /><label>Due date</label><input className="field" type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} /></>}<div className="actions"><button className="btn" onClick={() => setPointModal(false)}>Cancel</button><button className="btn primary" onClick={savePoint}>Save Point</button></div></div></div>}
+    </main>
   );
 }
