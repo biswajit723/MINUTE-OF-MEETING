@@ -7,6 +7,14 @@ type PointStatus = "Open" | "Completed";
 type ActiveTab = "information" | "action" | "attendance";
 type UserRole = "owner" | "editor" | "viewer";
 type AttendanceStatus = "Present" | "Absent";
+type Priority = "Low" | "Medium" | "High" | "Critical";
+
+type PointComment = {
+  id: number;
+  text: string;
+  author: string;
+  createdAt: string;
+};
 
 type MeetingPoint = {
   id: number;
@@ -17,6 +25,10 @@ type MeetingPoint = {
   pinned?: boolean;
   responsiblePerson?: string;
   dueDate?: string;
+  priority?: Priority;
+  progress?: number;
+  comments?: PointComment[];
+  carriedFrom?: string;
 };
 
 type Attendance = {
@@ -101,6 +113,12 @@ function normalizeMeetings(value: unknown): Meeting[] {
     information: meeting.information || [],
     action: meeting.action || [],
     attendance: meeting.attendance || [],
+    action: (meeting.action || []).map((point) => ({
+      ...point,
+      priority: point.priority || "Medium",
+      progress: point.progress ?? (point.status === "Completed" ? 100 : 0),
+      comments: point.comments || [],
+    })),
   }));
 }
 
@@ -133,6 +151,11 @@ export default function Page() {
   const [addedBy, setAddedBy] = useState("");
   const [responsiblePerson, setResponsiblePerson] = useState("");
   const [dueDate, setDueDate] = useState("");
+  const [priority, setPriority] = useState<Priority>("Medium");
+  const [progress, setProgress] = useState(0);
+  const [myDashboard, setMyDashboard] = useState(false);
+  const [commentPointId, setCommentPointId] = useState<number | null>(null);
+  const [commentText, setCommentText] = useState("");
 
   const [attendanceProfileId, setAttendanceProfileId] = useState("");
   const [teamProfiles, setTeamProfiles] = useState<TeamProfile[]>([]);
@@ -352,6 +375,10 @@ export default function Page() {
     const query = normalizeText(search);
     return [...points]
       .filter((point) => {
+        if (
+          myDashboard &&
+          normalizeText(point.responsiblePerson || "") !== normalizeText(currentUserName)
+        ) return false;
         if (memberFilter && point.addedBy !== memberFilter) return false;
         if (
           responsibleFilter &&
@@ -379,6 +406,8 @@ export default function Page() {
     responsibleFilter,
     statusFilter,
     dueFilter,
+    myDashboard,
+    currentUserName,
   ]);
 
   const allActions = meetings.flatMap((meeting) =>
@@ -389,6 +418,10 @@ export default function Page() {
   const dueSoonActions = openActions.filter((point) =>
     ["today", "soon"].includes(dueState(point))
   );
+  const myActions = allActions.filter(
+    (point) => normalizeText(point.responsiblePerson || "") === normalizeText(currentUserName)
+  );
+  const myOpenActions = myActions.filter((point) => point.status !== "Completed");
 
   function updateSelectedMeeting(updater: (meeting: Meeting) => Meeting) {
     setMeetings((current) =>
@@ -453,6 +486,8 @@ export default function Page() {
     setAddedBy("");
     setResponsiblePerson("");
     setDueDate("");
+    setPriority("Medium");
+    setProgress(0);
     setPointModal(true);
   }
 
@@ -462,6 +497,8 @@ export default function Page() {
     setAddedBy(point.addedBy);
     setResponsiblePerson(point.responsiblePerson || "");
     setDueDate(point.dueDate || "");
+    setPriority(point.priority || "Medium");
+    setProgress(point.progress ?? (point.status === "Completed" ? 100 : 0));
     setPointModal(true);
   }
 
@@ -484,6 +521,9 @@ export default function Page() {
                   responsiblePerson:
                     key === "action" ? responsiblePerson.trim() : undefined,
                   dueDate: key === "action" ? dueDate : undefined,
+                  priority: key === "action" ? priority : undefined,
+                  progress: key === "action" ? progress : undefined,
+                  status: key === "action" && progress === 100 ? "Completed" : point.status,
                 }
               : point
           ),
@@ -502,6 +542,9 @@ export default function Page() {
         responsiblePerson:
           key === "action" ? responsiblePerson.trim() : undefined,
         dueDate: key === "action" ? dueDate : undefined,
+        priority: key === "action" ? priority : undefined,
+        progress: key === "action" ? progress : undefined,
+        comments: [],
       };
       return { ...meeting, [key]: [...list, point] };
     });
@@ -524,6 +567,61 @@ export default function Page() {
       ...meeting,
       [key]: meeting[key].filter((point) => point.id !== id),
     }));
+  }
+
+  function changeProgress(pointId: number, value: number) {
+    mutatePoint(pointId, (point) => ({
+      ...point,
+      progress: value,
+      status: value === 100 ? "Completed" : point.status === "Completed" ? "Open" : point.status,
+    }));
+  }
+
+  function addComment() {
+    if (!commentPointId || !commentText.trim()) return;
+    mutatePoint(commentPointId, (point) => ({
+      ...point,
+      comments: [
+        ...(point.comments || []),
+        {
+          id: Date.now(),
+          text: commentText.trim(),
+          author: currentUserName || "Team Member",
+          createdAt: new Date().toLocaleString("en-GB"),
+        },
+      ],
+    }));
+    setCommentText("");
+  }
+
+  function carryForward(point: MeetingPoint) {
+    const nextMeeting = [...meetings]
+      .filter((meeting) => meeting.id !== selectedMeetingId)
+      .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
+      .find((meeting) => new Date(meeting.date).getTime() >= new Date(selectedMeeting.date).getTime());
+
+    if (!nextMeeting) {
+      window.alert("Create the next TBM first, then carry this action forward.");
+      return;
+    }
+
+    setMeetings((current) => current.map((meeting) =>
+      meeting.id === nextMeeting.id
+        ? {
+            ...meeting,
+            action: [
+              ...meeting.action,
+              {
+                ...point,
+                id: Date.now(),
+                status: "Open",
+                carriedFrom: selectedMeeting.name,
+              },
+            ],
+          }
+        : meeting
+    ));
+    window.alert(`Action carried forward to ${nextMeeting.name}.`);
   }
 
   function addAttendance() {
@@ -638,7 +736,7 @@ export default function Page() {
   return (
     <main className="page">
       <style jsx global>{`
-        *{box-sizing:border-box}html,body{margin:0;background:#06101d;color:#eef7ff;font-family:Inter,"Segoe UI",Arial,sans-serif}button,input,select,textarea{font:inherit}.page{min-height:100vh;padding:28px;background:radial-gradient(circle at 7% 3%,rgba(0,194,229,.22),transparent 27%),radial-gradient(circle at 95% 20%,rgba(113,76,235,.25),transparent 30%),#06101d}.container{max-width:1500px;margin:auto}.header{display:flex;justify-content:space-between;gap:18px;align-items:flex-start;margin-bottom:20px}.eyebrow{color:#5ee8fa;font-size:12px;font-weight:900;letter-spacing:2px}.title{font-size:clamp(38px,5vw,66px);margin:8px 0}.title span{color:#63a9ff}.muted{color:#91a6ba}.actions{display:flex;gap:9px;flex-wrap:wrap}.btn{padding:12px 16px;border:1px solid rgba(255,255,255,.13);border-radius:13px;background:rgba(255,255,255,.07);color:white;font-weight:800;cursor:pointer}.btn.primary{background:linear-gradient(135deg,#159cf0,#6870f4)}.btn.danger{color:#ff9da8}.menu-wrap{position:relative}.dots{width:38px;height:38px;padding:0;font-size:22px}.menu{position:absolute;z-index:50;top:43px;right:0;width:190px;padding:7px;border:1px solid rgba(255,255,255,.13);border-radius:14px;background:#102033;box-shadow:0 18px 45px rgba(0,0,0,.55)}.menu button{display:block;width:100%;padding:10px 11px;border:0;border-radius:9px;background:transparent;color:#e8f3fc;text-align:left;cursor:pointer}.menu button:hover{background:rgba(22,140,255,.17)}.menu button.danger{color:#ff9da8}.menu button.danger:hover{color:white;background:rgba(225,57,80,.7)}.stats{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:12px;margin-bottom:18px}.stat{padding:17px;border:1px solid rgba(255,255,255,.1);border-radius:19px;background:rgba(255,255,255,.05)}.stat small{color:#8ca1b5;font-weight:800}.stat strong{display:block;margin-top:8px;font-size:25px}.layout{display:grid;grid-template-columns:330px minmax(0,1fr);gap:16px}.panel{border:1px solid rgba(255,255,255,.11);border-radius:23px;background:rgba(255,255,255,.05);padding:19px}.search{width:100%;padding:13px;color:white;background:#050d18;border:1px solid rgba(255,255,255,.12);border-radius:12px;outline:none}.history{display:flex;flex-direction:column;gap:9px;margin-top:12px}.history-card{display:flex;gap:8px;padding:13px;border:1px solid rgba(255,255,255,.08);border-radius:15px;background:rgba(255,255,255,.025)}.history-card.active{border-color:#329fff;background:rgba(22,140,255,.14)}.history-main{flex:1;background:none;border:0;color:white;text-align:left;cursor:pointer}.tiny{padding:7px 9px}.meeting-head{display:flex;justify-content:space-between;align-items:center;gap:12px}.toolbar{display:grid;grid-template-columns:2fr repeat(4,1fr);gap:8px;margin:18px 0}.tabs{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;padding:6px;background:#050b15;border-radius:17px;margin-bottom:17px}.tab{padding:13px;border:0;border-radius:12px;background:rgba(255,255,255,.04);color:#91a5b8;font-weight:900;cursor:pointer}.tab.active{color:white;background:#168cff}.point-list{display:flex;flex-direction:column;gap:11px}.point{display:grid;grid-template-columns:44px 1fr auto;gap:13px;padding:17px;background:rgba(4,15,26,.82);border:1px solid rgba(255,255,255,.09);border-radius:18px}.number{display:grid;place-items:center;width:44px;height:44px;border-radius:13px;background:rgba(16,193,222,.14);color:#5fe7f8;font-weight:900}.point h3{margin:0 0 9px;font-size:16px;line-height:1.5}.point.completed h3{text-decoration:line-through;color:#71869a}.meta{display:flex;gap:9px;flex-wrap:wrap;color:#8499ad;font-size:12px}.chip{padding:5px 8px;border-radius:999px;background:rgba(22,140,255,.12);color:#77c9ff}.chip.overdue{background:rgba(255,70,91,.14);color:#ff929f}.chip.today{background:rgba(255,181,71,.14);color:#ffc361}.chip.soon{background:rgba(177,118,255,.15);color:#c49bff}.attendance-form{display:flex;gap:8px;margin-bottom:14px}.attendance-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.attendance{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:13px;border:1px solid rgba(255,255,255,.09);border-radius:14px}.modal-bg{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:18px;background:rgba(1,5,10,.88)}.modal{width:100%;max-width:570px;padding:24px;border:1px solid rgba(255,255,255,.14);border-radius:22px;background:#0d1b2a}.modal h2{margin-top:0}.field{width:100%;padding:13px;margin:6px 0 13px;color:white;background:#050d18;border:1px solid rgba(255,255,255,.13);border-radius:12px}.empty{padding:55px;text-align:center;color:#8398ab;border:1px dashed rgba(255,255,255,.14);border-radius:17px}.empty-page{min-height:100vh;display:grid;place-items:center;background:#06101d;color:white}.empty-page button{padding:12px}.alert-bar{margin-bottom:14px;padding:13px;border:1px solid rgba(255,190,73,.25);border-radius:14px;background:rgba(255,190,73,.08);color:#ffd78b}@media(max-width:1100px){.stats{grid-template-columns:repeat(3,1fr)}.layout{grid-template-columns:1fr}.toolbar{grid-template-columns:1fr 1fr}}@media(max-width:650px){.page{padding:13px}.header,.meeting-head{flex-direction:column}.stats{grid-template-columns:repeat(2,1fr)}.toolbar{grid-template-columns:1fr}.attendance-list{grid-template-columns:1fr}.point{grid-template-columns:38px 1fr}.point>.actions{grid-column:1/-1}.tabs{font-size:11px}}
+        *{box-sizing:border-box}html,body{margin:0;background:#06101d;color:#eef7ff;font-family:Inter,"Segoe UI",Arial,sans-serif}button,input,select,textarea{font:inherit}.page{min-height:100vh;padding:28px;background:radial-gradient(circle at 7% 3%,rgba(0,194,229,.22),transparent 27%),radial-gradient(circle at 95% 20%,rgba(113,76,235,.25),transparent 30%),#06101d}.container{max-width:1500px;margin:auto}.header{display:flex;justify-content:space-between;gap:18px;align-items:flex-start;margin-bottom:20px}.eyebrow{color:#5ee8fa;font-size:12px;font-weight:900;letter-spacing:2px}.title{font-size:clamp(38px,5vw,66px);margin:8px 0}.title span{color:#63a9ff}.muted{color:#91a6ba}.actions{display:flex;gap:9px;flex-wrap:wrap}.btn{padding:12px 16px;border:1px solid rgba(255,255,255,.13);border-radius:13px;background:rgba(255,255,255,.07);color:white;font-weight:800;cursor:pointer}.btn.primary{background:linear-gradient(135deg,#159cf0,#6870f4)}.btn.danger{color:#ff9da8}.menu-wrap{position:relative}.dots{width:38px;height:38px;padding:0;font-size:22px}.menu{position:absolute;z-index:50;top:43px;right:0;width:190px;padding:7px;border:1px solid rgba(255,255,255,.13);border-radius:14px;background:#102033;box-shadow:0 18px 45px rgba(0,0,0,.55)}.menu button{display:block;width:100%;padding:10px 11px;border:0;border-radius:9px;background:transparent;color:#e8f3fc;text-align:left;cursor:pointer}.menu button:hover{background:rgba(22,140,255,.17)}.menu button.danger{color:#ff9da8}.menu button.danger:hover{color:white;background:rgba(225,57,80,.7)}.stats{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:12px;margin-bottom:18px}.stat{padding:17px;border:1px solid rgba(255,255,255,.1);border-radius:19px;background:rgba(255,255,255,.05)}.stat small{color:#8ca1b5;font-weight:800}.stat strong{display:block;margin-top:8px;font-size:25px}.layout{display:grid;grid-template-columns:330px minmax(0,1fr);gap:16px}.panel{border:1px solid rgba(255,255,255,.11);border-radius:23px;background:rgba(255,255,255,.05);padding:19px}.search{width:100%;padding:13px;color:white;background:#050d18;border:1px solid rgba(255,255,255,.12);border-radius:12px;outline:none}.history{display:flex;flex-direction:column;gap:9px;margin-top:12px}.history-card{display:flex;gap:8px;padding:13px;border:1px solid rgba(255,255,255,.08);border-radius:15px;background:rgba(255,255,255,.025)}.history-card.active{border-color:#329fff;background:rgba(22,140,255,.14)}.history-main{flex:1;background:none;border:0;color:white;text-align:left;cursor:pointer}.tiny{padding:7px 9px}.meeting-head{display:flex;justify-content:space-between;align-items:center;gap:12px}.toolbar{display:grid;grid-template-columns:2fr repeat(4,1fr);gap:8px;margin:18px 0}.tabs{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;padding:6px;background:#050b15;border-radius:17px;margin-bottom:17px}.tab{padding:13px;border:0;border-radius:12px;background:rgba(255,255,255,.04);color:#91a5b8;font-weight:900;cursor:pointer}.tab.active{color:white;background:#168cff}.point-list{display:flex;flex-direction:column;gap:11px}.point{display:grid;grid-template-columns:44px 1fr auto;gap:13px;padding:17px;background:rgba(4,15,26,.82);border:1px solid rgba(255,255,255,.09);border-radius:18px}.number{display:grid;place-items:center;width:44px;height:44px;border-radius:13px;background:rgba(16,193,222,.14);color:#5fe7f8;font-weight:900}.point h3{margin:0 0 9px;font-size:16px;line-height:1.5}.point.completed h3{text-decoration:line-through;color:#71869a}.meta{display:flex;gap:9px;flex-wrap:wrap;color:#8499ad;font-size:12px}.chip{padding:5px 8px;border-radius:999px;background:rgba(22,140,255,.12);color:#77c9ff}.chip.overdue{background:rgba(255,70,91,.14);color:#ff929f}.chip.today{background:rgba(255,181,71,.14);color:#ffc361}.chip.soon{background:rgba(177,118,255,.15);color:#c49bff}.chip.priority-High,.chip.priority-Critical{color:#ff9da8;background:rgba(255,70,91,.14)}.chip.priority-Low{color:#73e6ad;background:rgba(85,229,163,.12)}.progress-row{display:flex;align-items:center;gap:8px;margin-top:10px}.progress-row input{flex:1}.comment-box{margin-top:10px;padding:10px;border-radius:11px;background:rgba(255,255,255,.04)}.comment-box small{color:#8fa5b8}.my-dashboard{border-color:#7b72ff!important;background:rgba(123,114,255,.18)!important}.attendance-form{display:flex;gap:8px;margin-bottom:14px}.attendance-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.attendance{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:13px;border:1px solid rgba(255,255,255,.09);border-radius:14px}.modal-bg{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:18px;background:rgba(1,5,10,.88)}.modal{width:100%;max-width:570px;padding:24px;border:1px solid rgba(255,255,255,.14);border-radius:22px;background:#0d1b2a}.modal h2{margin-top:0}.field{width:100%;padding:13px;margin:6px 0 13px;color:white;background:#050d18;border:1px solid rgba(255,255,255,.13);border-radius:12px}.empty{padding:55px;text-align:center;color:#8398ab;border:1px dashed rgba(255,255,255,.14);border-radius:17px}.empty-page{min-height:100vh;display:grid;place-items:center;background:#06101d;color:white}.empty-page button{padding:12px}.alert-bar{margin-bottom:14px;padding:13px;border:1px solid rgba(255,190,73,.25);border-radius:14px;background:rgba(255,190,73,.08);color:#ffd78b}@media(max-width:1100px){.stats{grid-template-columns:repeat(3,1fr)}.layout{grid-template-columns:1fr}.toolbar{grid-template-columns:1fr 1fr}}@media(max-width:650px){.page{padding:13px}.header,.meeting-head{flex-direction:column}.stats{grid-template-columns:repeat(2,1fr)}.toolbar{grid-template-columns:1fr}.attendance-list{grid-template-columns:1fr}.point{grid-template-columns:38px 1fr}.point>.actions{grid-column:1/-1}.tabs{font-size:11px}}
       `}</style>
       <div className="container">
         <header className="header">
@@ -652,6 +750,7 @@ export default function Page() {
             <button className="btn" onClick={enableNotifications}>
               {notificationPermission === "granted" ? "Notifications On" : "Enable Notifications"}
             </button>
+            <button className={`btn ${myDashboard ? "my-dashboard" : ""}`} onClick={() => { setMyDashboard((value) => !value); setActiveTab("action"); }}>👤 My Dashboard ({myOpenActions.length})</button>
             <button className="btn" onClick={generateReport}>📝 Generate Report</button>
             <button className="btn primary" onClick={openCreateMeeting}>+ Create TBM</button>
           </div>
@@ -739,7 +838,7 @@ export default function Page() {
                   return (
                     <article className={`point ${point.status === "Completed" ? "completed" : ""}`} key={point.id}>
                       <div className="number">{index + 1}</div>
-                      <div><h3>{point.pinned ? "📌 " : ""}{point.text}</h3><div className="meta"><span>Added by <strong>{point.addedBy}</strong></span><span>{point.addedAt}</span>{activeTab === "action" && <><span className="chip">👤 {point.responsiblePerson || "Unassigned"}</span><span className={`chip ${due}`}>📅 {formatDate(point.dueDate || "")}</span><span className="chip">{point.status}</span></>}</div></div>
+                      <div><h3>{point.pinned ? "📌 " : ""}{point.text}</h3><div className="meta"><span>Added by <strong>{point.addedBy}</strong></span><span>{point.addedAt}</span>{activeTab === "action" && <><span className="chip">👤 {point.responsiblePerson || "Unassigned"}</span><span className={`chip ${due}`}>📅 {formatDate(point.dueDate || "")}</span><span className="chip">{point.status}</span><span className={`chip priority-${point.priority || "Medium"}`}>⚑ {point.priority || "Medium"}</span><span className="chip">{point.progress ?? 0}%</span>{point.carriedFrom && <span className="chip">From {point.carriedFrom}</span>}</>}</div>{activeTab === "action" && <div className="progress-row"><input type="range" min="0" max="100" step="25" value={point.progress ?? 0} onChange={(e) => changeProgress(point.id, Number(e.target.value))} /><strong>{point.progress ?? 0}%</strong></div>}{(point.comments || []).map((comment) => <div className="comment-box" key={comment.id}><div>{comment.text}</div><small>{comment.author} · {comment.createdAt}</small></div>)}</div>
                       <div className="menu-wrap">
                         <button className="btn dots" onClick={() => { setOpenMeetingMenuId(null); setOpenPointMenuId((current) => current === point.id ? null : point.id); }}>⋮</button>
                         {openPointMenuId === point.id && (
@@ -747,6 +846,8 @@ export default function Page() {
                             <button onClick={() => { openEditPoint(point); setOpenPointMenuId(null); }}>✎ Edit point</button>
                             <button onClick={() => { mutatePoint(point.id, (item) => ({ ...item, pinned: !item.pinned })); setOpenPointMenuId(null); }}>{point.pinned ? "📌 Unpin point" : "📌 Pin point"}</button>
                             {activeTab === "action" && <button onClick={() => { mutatePoint(point.id, (item) => ({ ...item, status: item.status === "Completed" ? "Open" : "Completed" })); setOpenPointMenuId(null); }}>{point.status === "Completed" ? "↻ Reopen action" : "✓ Complete action"}</button>}
+                            {activeTab === "action" && <button onClick={() => { setCommentPointId(point.id); setOpenPointMenuId(null); }}>💬 Comments ({(point.comments || []).length})</button>}
+                            {activeTab === "action" && point.status !== "Completed" && <button onClick={() => { carryForward(point); setOpenPointMenuId(null); }}>→ Carry to next TBM</button>}
                             {canDeletePoint && <button className="danger" onClick={() => { deletePoint(point.id); setOpenPointMenuId(null); }}>🗑 Delete point</button>}
                           </div>
                         )}
@@ -762,7 +863,8 @@ export default function Page() {
 
       {meetingModal && <div className="modal-bg" onMouseDown={(e) => e.target === e.currentTarget && setMeetingModal(false)}><div className="modal"><h2>{editMeetingId ? "Edit TBM" : "Create TBM"}</h2><label>Meeting title</label><input className="field" value={meetingName} onChange={(e) => setMeetingName(e.target.value)} placeholder="Optional title" /><label>Meeting date</label><input className="field" type="date" value={meetingDate} onChange={(e) => setMeetingDate(e.target.value)} /><div className="actions"><button className="btn" onClick={() => setMeetingModal(false)}>Cancel</button><button className="btn primary" onClick={saveMeeting}>Save</button></div></div></div>}
 
-      {pointModal && <div className="modal-bg" onMouseDown={(e) => e.target === e.currentTarget && setPointModal(false)}><div className="modal"><h2>{editingPointId ? "Edit" : "Add"} {activeTab === "action" ? "Action" : "Information"} Point</h2><label>Added by</label><input className="field" list="team-members" value={addedBy} onChange={(e) => setAddedBy(e.target.value)} /><datalist id="team-members">{teamMembers.map((name) => <option key={name} value={name} />)}</datalist><label>Point details</label><textarea className="field" rows={5} value={pointText} onChange={(e) => setPointText(e.target.value)} />{activeTab === "action" && <><label>Responsible person</label><input className="field" list="team-members" value={responsiblePerson} onChange={(e) => setResponsiblePerson(e.target.value)} /><label>Due date</label><input className="field" type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} /></>}<div className="actions"><button className="btn" onClick={() => setPointModal(false)}>Cancel</button><button className="btn primary" onClick={savePoint}>Save Point</button></div></div></div>}
+      {pointModal && <div className="modal-bg" onMouseDown={(e) => e.target === e.currentTarget && setPointModal(false)}><div className="modal"><h2>{editingPointId ? "Edit" : "Add"} {activeTab === "action" ? "Action" : "Information"} Point</h2><label>Added by</label><input className="field" list="team-members" value={addedBy} onChange={(e) => setAddedBy(e.target.value)} /><datalist id="team-members">{teamMembers.map((name) => <option key={name} value={name} />)}</datalist><label>Point details</label><textarea className="field" rows={5} value={pointText} onChange={(e) => setPointText(e.target.value)} />{activeTab === "action" && <><label>Responsible person</label><input className="field" list="team-members" value={responsiblePerson} onChange={(e) => setResponsiblePerson(e.target.value)} /><label>Due date</label><input className="field" type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} /><label>Priority</label><select className="field" value={priority} onChange={(e) => setPriority(e.target.value as Priority)}><option>Low</option><option>Medium</option><option>High</option><option>Critical</option></select><label>Progress: {progress}%</label><input className="field" type="range" min="0" max="100" step="25" value={progress} onChange={(e) => setProgress(Number(e.target.value))} /></>}<div className="actions"><button className="btn" onClick={() => setPointModal(false)}>Cancel</button><button className="btn primary" onClick={savePoint}>Save Point</button></div></div></div>}
+      {commentPointId !== null && <div className="modal-bg" onMouseDown={(e) => e.target === e.currentTarget && setCommentPointId(null)}><div className="modal"><h2>Action Comments</h2><textarea className="field" rows={4} placeholder="Write a progress update..." value={commentText} onChange={(e) => setCommentText(e.target.value)} /><div className="actions"><button className="btn" onClick={() => setCommentPointId(null)}>Close</button><button className="btn primary" onClick={addComment}>Add Comment</button></div></div></div>}
     </main>
   );
 }
