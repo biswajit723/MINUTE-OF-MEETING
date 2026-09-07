@@ -3,12 +3,18 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { createClient } from "@supabase/supabase-js";
-import * as XLSX from "xlsx-js-style";
 
 type PointStatus = "Open" | "Completed";
 type ActiveTab = "information" | "action" | "attendance";
 type UserRole = "owner" | "editor" | "viewer";
 type AttendanceStatus = "Present" | "Absent";
+type ReactionEmoji = "👍" | "✅" | "👏" | "❤️" | "👀";
+
+type PointReaction = {
+  userId: string;
+  userName: string;
+  emoji: ReactionEmoji;
+};
 
 type MeetingPoint = {
   id: number;
@@ -19,6 +25,7 @@ type MeetingPoint = {
   pinned?: boolean;
   responsiblePerson?: string;
   dueDate?: string;
+  reactions?: PointReaction[];
 };
 
 type Attendance = {
@@ -100,8 +107,14 @@ function normalizeMeetings(value: unknown): Meeting[] {
   return (value as Meeting[]).map((meeting, index) => ({
     ...meeting,
     serialNumber: meeting.serialNumber || index + 1,
-    information: meeting.information || [],
-    action: meeting.action || [],
+    information: (meeting.information || []).map((point) => ({
+      ...point,
+      reactions: point.reactions || [],
+    })),
+    action: (meeting.action || []).map((point) => ({
+      ...point,
+      reactions: point.reactions || [],
+    })),
     attendance: meeting.attendance || [],
   }));
 }
@@ -139,7 +152,9 @@ export default function Page() {
 
   const [attendanceProfileId, setAttendanceProfileId] = useState("");
   const [teamProfiles, setTeamProfiles] = useState<TeamProfile[]>([]);
+  const [currentUserId, setCurrentUserId] = useState("");
   const [currentUserName, setCurrentUserName] = useState("");
+  const [reactionPanelPointId, setReactionPanelPointId] = useState<number | null>(null);
   const [openMeetingMenuId, setOpenMeetingMenuId] = useState<number | null>(null);
   const [openPointMenuId, setOpenPointMenuId] = useState<number | null>(null);
   const [notificationPermission, setNotificationPermission] =
@@ -187,6 +202,7 @@ export default function Page() {
         user.user_metadata?.full_name?.trim() ||
         user.email?.split("@")[0] ||
         "Team Member";
+      setCurrentUserId(user.id);
       setCurrentUserName(signedInName);
 
       const { data: profileList, error: profileListError } = await supabase
@@ -461,7 +477,7 @@ export default function Page() {
   function openNewPoint() {
     setEditingPointId(null);
     setPointText("");
-    setAddedBy("");
+    setAddedBy(currentUserName);
     setResponsiblePerson("");
     setDueDate("");
     setPointModal(true);
@@ -470,15 +486,15 @@ export default function Page() {
   function openEditPoint(point: MeetingPoint) {
     setEditingPointId(point.id);
     setPointText(point.text);
-    setAddedBy(point.addedBy);
+    setAddedBy(currentUserName);
     setResponsiblePerson(point.responsiblePerson || "");
     setDueDate(point.dueDate || "");
     setPointModal(true);
   }
 
   function savePoint() {
-    if (!pointText.trim() || !addedBy.trim()) {
-      return window.alert("Added by and point details are required.");
+    if (!pointText.trim() || !currentUserName.trim()) {
+      return window.alert("Your login name and point details are required.");
     }
     const key = activeTab === "action" ? "action" : "information";
     updateSelectedMeeting((meeting) => {
@@ -491,7 +507,7 @@ export default function Page() {
               ? {
                   ...point,
                   text: pointText.trim(),
-                  addedBy: addedBy.trim(),
+                  addedBy: point.addedBy || currentUserName.trim(),
                   responsiblePerson:
                     key === "action" ? responsiblePerson.trim() : undefined,
                   dueDate: key === "action" ? dueDate : undefined,
@@ -503,7 +519,7 @@ export default function Page() {
       const point: MeetingPoint = {
         id: Date.now(),
         text: pointText.trim(),
-        addedBy: addedBy.trim(),
+        addedBy: currentUserName.trim(),
         addedAt: new Date().toLocaleTimeString("en-US", {
           hour: "2-digit",
           minute: "2-digit",
@@ -513,6 +529,7 @@ export default function Page() {
         responsiblePerson:
           key === "action" ? responsiblePerson.trim() : undefined,
         dueDate: key === "action" ? dueDate : undefined,
+        reactions: [],
       };
       return { ...meeting, [key]: [...list, point] };
     });
@@ -525,6 +542,43 @@ export default function Page() {
       ...meeting,
       [key]: meeting[key].map((point) => (point.id === id ? updater(point) : point)),
     }));
+  }
+
+  function reactToPoint(pointId: number, emoji: ReactionEmoji) {
+    if (!currentUserId || !currentUserName) {
+      window.alert("Please sign in before reacting.");
+      return;
+    }
+
+    mutatePoint(pointId, (point) => {
+      const reactions = point.reactions || [];
+      const existing = reactions.find(
+        (reaction) => reaction.userId === currentUserId
+      );
+
+      if (existing?.emoji === emoji) {
+        return {
+          ...point,
+          reactions: reactions.filter(
+            (reaction) => reaction.userId !== currentUserId
+          ),
+        };
+      }
+
+      return {
+        ...point,
+        reactions: [
+          ...reactions.filter(
+            (reaction) => reaction.userId !== currentUserId
+          ),
+          {
+            userId: currentUserId,
+            userName: currentUserName,
+            emoji,
+          },
+        ],
+      };
+    });
   }
 
   function deletePoint(id: number) {
@@ -614,113 +668,6 @@ export default function Page() {
     window.alert(lines.length ? lines.join("\n\n") : "No overdue or upcoming actions.");
   }
 
-  function downloadAllMeetingsExcel() {
-    if (meetings.length === 0) {
-      window.alert("No TBM data is available to export.");
-      return;
-    }
-
-    const rows: (string | number)[][] = [
-      ["TBM NO.", "TBM", "INFORMATION", "ACTION"],
-    ];
-
-    [...meetings]
-      .sort((first, second) => first.serialNumber - second.serialNumber)
-      .forEach((meeting) => {
-        const information = meeting.information.length
-          ? meeting.information
-              .map((point, index) => `${index + 1}. ${point.text}`)
-              .join("\n")
-          : "";
-
-        const action = meeting.action.length
-          ? meeting.action
-              .map((point, index) => {
-                const responsible = point.responsiblePerson
-                  ? ` | Responsible: ${point.responsiblePerson}`
-                  : "";
-                const due = point.dueDate
-                  ? ` | Due: ${formatDate(point.dueDate)}`
-                  : "";
-                const status = ` | Status: ${point.status || "Open"}`;
-                return `${index + 1}. ${point.text}${responsible}${due}${status}`;
-              })
-              .join("\n")
-          : "";
-
-        rows.push([
-          meeting.serialNumber,
-          `${meeting.name}\n${formatDate(meeting.date)}`,
-          information,
-          action,
-        ]);
-      });
-
-    const worksheet = XLSX.utils.aoa_to_sheet(rows);
-    worksheet["!cols"] = [
-      { wch: 12 },
-      { wch: 28 },
-      { wch: 68 },
-      { wch: 78 },
-    ];
-    worksheet["!rows"] = rows.map((_, index) => ({
-      hpt: index === 0 ? 28 : 75,
-    }));
-    worksheet["!freeze"] = { xSplit: 0, ySplit: 1 };
-    worksheet["!autofilter"] = { ref: `A1:D${rows.length}` };
-
-    const headerColors = ["F4B183", "FFF200", "4EA72E", "A02B93"];
-
-    for (let column = 0; column < 4; column += 1) {
-      const address = XLSX.utils.encode_cell({ r: 0, c: column });
-      const cell = worksheet[address];
-      if (!cell) continue;
-      cell.s = {
-        font: { bold: true, color: { rgb: "000000" }, sz: 12 },
-        fill: { patternType: "solid", fgColor: { rgb: headerColors[column] } },
-        alignment: { horizontal: "center", vertical: "center" },
-        border: {
-          top: { style: "thin", color: { rgb: "808080" } },
-          bottom: { style: "thin", color: { rgb: "808080" } },
-          left: { style: "thin", color: { rgb: "808080" } },
-          right: { style: "thin", color: { rgb: "808080" } },
-        },
-      };
-    }
-
-    for (let row = 1; row < rows.length; row += 1) {
-      for (let column = 0; column < 4; column += 1) {
-        const address = XLSX.utils.encode_cell({ r: row, c: column });
-        const cell = worksheet[address];
-        if (!cell) continue;
-        cell.s = {
-          alignment: {
-            vertical: "top",
-            horizontal: column === 0 ? "center" : "left",
-            wrapText: true,
-          },
-          border: {
-            top: { style: "thin", color: { rgb: "D9D9D9" } },
-            bottom: { style: "thin", color: { rgb: "D9D9D9" } },
-            left: { style: "thin", color: { rgb: "D9D9D9" } },
-            right: { style: "thin", color: { rgb: "D9D9D9" } },
-          },
-          fill: {
-            patternType: "solid",
-            fgColor: { rgb: row % 2 === 0 ? "F8FBFE" : "FFFFFF" },
-          },
-        };
-      }
-    }
-
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, "TBM Points");
-    XLSX.writeFile(
-      workbook,
-      `MOM-TBM-Points-${new Date().toISOString().slice(0, 10)}.xlsx`
-    );
-  }
-
   function generateReport() {
     if (!selectedMeeting) return;
     const escape = (value: string) =>
@@ -756,7 +703,7 @@ export default function Page() {
   return (
     <main className="page">
       <style jsx global>{`
-        *{box-sizing:border-box}html,body{margin:0;background:#06101d;color:#eef7ff;font-family:Inter,"Segoe UI",Arial,sans-serif}button,input,select,textarea{font:inherit}.page{min-height:100vh;padding:28px;background:radial-gradient(circle at 7% 3%,rgba(0,194,229,.22),transparent 27%),radial-gradient(circle at 95% 20%,rgba(113,76,235,.25),transparent 30%),#06101d}.container{max-width:1500px;margin:auto}.header{display:flex;justify-content:space-between;gap:18px;align-items:flex-start;margin-bottom:20px}.eyebrow{color:#5ee8fa;font-size:12px;font-weight:900;letter-spacing:2px}.title{font-size:clamp(38px,5vw,66px);margin:8px 0}.title span{color:#63a9ff}.muted{color:#91a6ba}.actions{display:flex;gap:9px;flex-wrap:wrap}.btn{padding:12px 16px;border:1px solid rgba(255,255,255,.13);border-radius:13px;background:rgba(255,255,255,.07);color:white;font-weight:800;cursor:pointer}.btn.primary{background:linear-gradient(135deg,#159cf0,#6870f4)}.btn.danger{color:#ff9da8}.menu-wrap{position:relative}.dots{width:38px;height:38px;padding:0;font-size:22px}.menu{position:absolute;z-index:50;top:43px;right:0;width:190px;padding:7px;border:1px solid rgba(255,255,255,.13);border-radius:14px;background:#102033;box-shadow:0 18px 45px rgba(0,0,0,.55)}.menu button{display:block;width:100%;padding:10px 11px;border:0;border-radius:9px;background:transparent;color:#e8f3fc;text-align:left;cursor:pointer}.menu button:hover{background:rgba(22,140,255,.17)}.menu button.danger{color:#ff9da8}.menu button.danger:hover{color:white;background:rgba(225,57,80,.7)}.mobile-menu-only{display:none!important}.mobile-section-label{display:none}.stats{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:12px;margin-bottom:18px}.stat{padding:17px;border:1px solid rgba(255,255,255,.1);border-radius:19px;background:rgba(255,255,255,.05)}.stat small{color:#8ca1b5;font-weight:800}.stat strong{display:block;margin-top:8px;font-size:25px}.layout{display:grid;grid-template-columns:330px minmax(0,1fr);gap:16px}.panel{border:1px solid rgba(255,255,255,.11);border-radius:23px;background:rgba(255,255,255,.05);padding:19px}.search{width:100%;padding:13px;color:white;background:#050d18;border:1px solid rgba(255,255,255,.12);border-radius:12px;outline:none}.history{display:flex;flex-direction:column;gap:9px;margin-top:12px}.history-card{display:flex;gap:8px;padding:13px;border:1px solid rgba(255,255,255,.08);border-radius:15px;background:rgba(255,255,255,.025)}.history-card.active{border-color:#329fff;background:rgba(22,140,255,.14)}.history-main{flex:1;background:none;border:0;color:white;text-align:left;cursor:pointer}.tiny{padding:7px 9px}.meeting-head{display:flex;justify-content:space-between;align-items:center;gap:12px}.toolbar{display:grid;grid-template-columns:2fr repeat(4,1fr);gap:8px;margin:18px 0}.tabs{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;padding:6px;background:#050b15;border-radius:17px;margin-bottom:17px}.tab{padding:13px;border:0;border-radius:12px;background:rgba(255,255,255,.04);color:#91a5b8;font-weight:900;cursor:pointer}.tab.active{color:white;background:#168cff}.point-list{display:flex;flex-direction:column;gap:11px}.point{display:grid;grid-template-columns:44px 1fr auto;gap:13px;padding:17px;background:rgba(4,15,26,.82);border:1px solid rgba(255,255,255,.09);border-radius:18px}.number{display:grid;place-items:center;width:44px;height:44px;border-radius:13px;background:rgba(16,193,222,.14);color:#5fe7f8;font-weight:900}.point h3{margin:0 0 9px;font-size:16px;line-height:1.5}.point.completed h3{text-decoration:line-through;color:#71869a}.meta{display:flex;gap:9px;flex-wrap:wrap;color:#8499ad;font-size:12px}.chip{padding:5px 8px;border-radius:999px;background:rgba(22,140,255,.12);color:#77c9ff}.chip.overdue{background:rgba(255,70,91,.14);color:#ff929f}.chip.today{background:rgba(255,181,71,.14);color:#ffc361}.chip.soon{background:rgba(177,118,255,.15);color:#c49bff}.attendance-form{display:flex;gap:8px;margin-bottom:14px}.attendance-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.attendance{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:13px;border:1px solid rgba(255,255,255,.09);border-radius:14px}.modal-bg{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:18px;background:rgba(1,5,10,.88)}.modal{width:100%;max-width:570px;padding:24px;border:1px solid rgba(255,255,255,.14);border-radius:22px;background:#0d1b2a}.modal h2{margin-top:0}.field{width:100%;padding:13px;margin:6px 0 13px;color:white;background:#050d18;border:1px solid rgba(255,255,255,.13);border-radius:12px}.empty{padding:55px;text-align:center;color:#8398ab;border:1px dashed rgba(255,255,255,.14);border-radius:17px}.empty-page{min-height:100vh;display:grid;place-items:center;background:#06101d;color:white}.empty-page button{padding:12px}.alert-bar{margin-bottom:14px;padding:13px;border:1px solid rgba(255,190,73,.25);border-radius:14px;background:rgba(255,190,73,.08);color:#ffd78b}.panel,.meeting-main,.point>div{min-width:0}.btn{max-width:100%;white-space:normal;overflow-wrap:anywhere}.history-main,.point h3,.meta{min-width:0;overflow-wrap:anywhere}.toolbar>*{min-width:0}.collapsed-meeting{display:grid;place-items:center;min-height:320px;padding:30px;text-align:center;border:1px dashed rgba(255,255,255,.16);border-radius:20px;color:#8fa5b8}.collapsed-meeting h2{margin:0 0 8px;color:#edf7ff}.menu{max-width:calc(100vw - 32px)}@media(max-width:1100px){.stats{grid-template-columns:repeat(3,1fr)}.layout{grid-template-columns:1fr}.toolbar{grid-template-columns:1fr 1fr}}@media(max-width:650px){.page{padding:10px;overflow-x:hidden}.container{width:100%;min-width:0}.header,.meeting-head{flex-direction:column;align-items:stretch}.header>.actions,.meeting-head>.actions{width:100%;display:grid;grid-template-columns:1fr 1fr}.header>.actions .btn,.meeting-head>.actions .btn{width:100%}.stats{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.stat{padding:12px;min-width:0}.stat strong{font-size:19px;overflow-wrap:anywhere}.layout{display:flex;flex-direction:column;gap:10px}.layout>aside.panel{display:contents}.layout>aside.panel>h2{order:1;margin:0 0 4px}.layout>aside.panel>.search{order:2}.layout>aside.panel>.history{display:contents}.history-card{order:var(--mobile-order);width:100%;margin-top:4px}.meeting-main{order:var(--mobile-order);width:100%;margin:0 0 8px;padding:12px;border-color:rgba(50,159,255,.45);animation:mobileExpand .18s ease-out}.panel{padding:12px;border-radius:16px}.toolbar{grid-template-columns:1fr}.attendance-list{grid-template-columns:1fr}.attendance,.attendance-form{align-items:stretch;flex-direction:column}.attendance .actions{display:grid;grid-template-columns:1fr auto}.point{grid-template-columns:36px minmax(0,1fr) auto;padding:12px;gap:8px}.number{width:36px;height:36px}.tabs{display:flex;overflow-x:auto;font-size:11px;scrollbar-width:thin}.tab{flex:1 0 auto;min-width:120px}.menu{position:fixed;top:auto;right:14px;left:14px;bottom:18px;width:auto;max-height:70vh;overflow-y:auto}.modal-bg{padding:10px}.modal{max-height:92vh;overflow-y:auto;padding:17px}.own-profile,.own-name-edit{align-items:stretch;flex-direction:column}.meeting-main>.meeting-head,.meeting-main>.toolbar,.meeting-main>.tabs{display:none}.meeting-main{padding-top:10px}.mobile-menu-only{display:block!important}.mobile-section-label{display:block;margin:0 0 10px;padding:8px 10px;border-radius:10px;background:rgba(22,140,255,.1);color:#8fd6ff;font-size:12px;font-weight:900}.collapsed-meeting{display:none}}@keyframes mobileExpand{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:translateY(0)}}
+        *{box-sizing:border-box}html,body{margin:0;background:#06101d;color:#eef7ff;font-family:Inter,"Segoe UI",Arial,sans-serif}button,input,select,textarea{font:inherit}.page{min-height:100vh;padding:28px;background:radial-gradient(circle at 7% 3%,rgba(0,194,229,.22),transparent 27%),radial-gradient(circle at 95% 20%,rgba(113,76,235,.25),transparent 30%),#06101d}.container{max-width:1500px;margin:auto}.header{display:flex;justify-content:space-between;gap:18px;align-items:flex-start;margin-bottom:20px}.eyebrow{color:#5ee8fa;font-size:12px;font-weight:900;letter-spacing:2px}.title{font-size:clamp(38px,5vw,66px);margin:8px 0}.title span{color:#63a9ff}.muted{color:#91a6ba}.actions{display:flex;gap:9px;flex-wrap:wrap}.btn{padding:12px 16px;border:1px solid rgba(255,255,255,.13);border-radius:13px;background:rgba(255,255,255,.07);color:white;font-weight:800;cursor:pointer}.btn.primary{background:linear-gradient(135deg,#159cf0,#6870f4)}.btn.danger{color:#ff9da8}.menu-wrap{position:relative}.dots{width:38px;height:38px;padding:0;font-size:22px}.menu{position:absolute;z-index:50;top:43px;right:0;width:190px;padding:7px;border:1px solid rgba(255,255,255,.13);border-radius:14px;background:#102033;box-shadow:0 18px 45px rgba(0,0,0,.55)}.menu button{display:block;width:100%;padding:10px 11px;border:0;border-radius:9px;background:transparent;color:#e8f3fc;text-align:left;cursor:pointer}.menu button:hover{background:rgba(22,140,255,.17)}.menu button.danger{color:#ff9da8}.menu button.danger:hover{color:white;background:rgba(225,57,80,.7)}.mobile-menu-only{display:none!important}.mobile-section-label{display:none}.menu-reactions{display:grid;grid-template-columns:repeat(5,1fr);gap:5px;padding:5px}.menu-reactions button{padding:8px 4px;text-align:center;background:rgba(255,255,255,.055)}.menu-reactions button.active{background:rgba(22,140,255,.25);border:1px solid #38a9ff}.stats{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:12px;margin-bottom:18px}.stat{padding:17px;border:1px solid rgba(255,255,255,.1);border-radius:19px;background:rgba(255,255,255,.05)}.stat small{color:#8ca1b5;font-weight:800}.stat strong{display:block;margin-top:8px;font-size:25px}.layout{display:grid;grid-template-columns:330px minmax(0,1fr);gap:16px}.panel{border:1px solid rgba(255,255,255,.11);border-radius:23px;background:rgba(255,255,255,.05);padding:19px}.search{width:100%;padding:13px;color:white;background:#050d18;border:1px solid rgba(255,255,255,.12);border-radius:12px;outline:none}.history{display:flex;flex-direction:column;gap:9px;margin-top:12px}.history-card{display:flex;gap:8px;padding:13px;border:1px solid rgba(255,255,255,.08);border-radius:15px;background:rgba(255,255,255,.025)}.history-card.active{border-color:#329fff;background:rgba(22,140,255,.14)}.history-main{flex:1;background:none;border:0;color:white;text-align:left;cursor:pointer}.tiny{padding:7px 9px}.meeting-head{display:flex;justify-content:space-between;align-items:center;gap:12px}.toolbar{display:grid;grid-template-columns:2fr repeat(4,1fr);gap:8px;margin:18px 0}.tabs{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;padding:6px;background:#050b15;border-radius:17px;margin-bottom:17px}.tab{padding:13px;border:0;border-radius:12px;background:rgba(255,255,255,.04);color:#91a5b8;font-weight:900;cursor:pointer}.tab.active{color:white;background:#168cff}.point-list{display:flex;flex-direction:column;gap:11px}.point{display:grid;grid-template-columns:44px 1fr auto;gap:13px;padding:17px;background:rgba(4,15,26,.82);border:1px solid rgba(255,255,255,.09);border-radius:18px}.number{display:grid;place-items:center;width:44px;height:44px;border-radius:13px;background:rgba(16,193,222,.14);color:#5fe7f8;font-weight:900}.point h3{margin:0 0 9px;font-size:16px;line-height:1.5}.point.completed h3{text-decoration:line-through;color:#71869a}.meta{display:flex;gap:9px;flex-wrap:wrap;color:#8499ad;font-size:12px}.chip{padding:5px 8px;border-radius:999px;background:rgba(22,140,255,.12);color:#77c9ff}.chip.overdue{background:rgba(255,70,91,.14);color:#ff929f}.chip.today{background:rgba(255,181,71,.14);color:#ffc361}.chip.soon{background:rgba(177,118,255,.15);color:#c49bff}.reaction-area{display:flex;gap:7px;flex-wrap:wrap;margin-top:12px}.reaction-btn{padding:7px 10px;border:1px solid rgba(255,255,255,.11);border-radius:999px;background:rgba(255,255,255,.055);color:white;cursor:pointer}.reaction-btn.active{border-color:#38a9ff;background:rgba(22,140,255,.2)}.reaction-summary{margin-top:10px;padding:10px;border-radius:11px;background:rgba(255,255,255,.04);font-size:12px}.reaction-summary strong{display:block;margin-bottom:5px;color:#8fd6ff}.reaction-summary span{color:#a7b8c8}.attendance-form{display:flex;gap:8px;margin-bottom:14px}.attendance-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.attendance{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:13px;border:1px solid rgba(255,255,255,.09);border-radius:14px}.modal-bg{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:18px;background:rgba(1,5,10,.88)}.modal{width:100%;max-width:570px;padding:24px;border:1px solid rgba(255,255,255,.14);border-radius:22px;background:#0d1b2a}.modal h2{margin-top:0}.field{width:100%;padding:13px;margin:6px 0 13px;color:white;background:#050d18;border:1px solid rgba(255,255,255,.13);border-radius:12px}.empty{padding:55px;text-align:center;color:#8398ab;border:1px dashed rgba(255,255,255,.14);border-radius:17px}.empty-page{min-height:100vh;display:grid;place-items:center;background:#06101d;color:white}.empty-page button{padding:12px}.alert-bar{margin-bottom:14px;padding:13px;border:1px solid rgba(255,190,73,.25);border-radius:14px;background:rgba(255,190,73,.08);color:#ffd78b}.panel,.meeting-main,.point>div{min-width:0}.btn{max-width:100%;white-space:normal;overflow-wrap:anywhere}.history-main,.point h3,.meta{min-width:0;overflow-wrap:anywhere}.toolbar>*{min-width:0}.collapsed-meeting{display:grid;place-items:center;min-height:320px;padding:30px;text-align:center;border:1px dashed rgba(255,255,255,.16);border-radius:20px;color:#8fa5b8}.collapsed-meeting h2{margin:0 0 8px;color:#edf7ff}.menu{max-width:calc(100vw - 32px)}@media(max-width:1100px){.stats{grid-template-columns:repeat(3,1fr)}.layout{grid-template-columns:1fr}.toolbar{grid-template-columns:1fr 1fr}}@media(max-width:650px){.page{padding:10px;overflow-x:hidden}.container{width:100%;min-width:0}.header,.meeting-head{flex-direction:column;align-items:stretch}.header>.actions,.meeting-head>.actions{width:100%;display:grid;grid-template-columns:1fr 1fr}.header>.actions .btn,.meeting-head>.actions .btn{width:100%}.stats{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.stat{padding:12px;min-width:0}.stat strong{font-size:19px;overflow-wrap:anywhere}.layout{display:flex;flex-direction:column;gap:10px}.layout>aside.panel{display:contents}.layout>aside.panel>h2{order:1;margin:0 0 4px}.layout>aside.panel>.search{order:2}.layout>aside.panel>.history{display:contents}.history-card{order:var(--mobile-order);width:100%;margin-top:4px}.meeting-main{order:var(--mobile-order);width:100%;margin:0 0 8px;padding:12px;border-color:rgba(50,159,255,.45);animation:mobileExpand .18s ease-out}.panel{padding:12px;border-radius:16px}.toolbar{grid-template-columns:1fr}.attendance-list{grid-template-columns:1fr}.attendance,.attendance-form{align-items:stretch;flex-direction:column}.attendance .actions{display:grid;grid-template-columns:1fr auto}.point{grid-template-columns:36px minmax(0,1fr) auto;padding:12px;gap:8px}.number{width:36px;height:36px}.tabs{display:flex;overflow-x:auto;font-size:11px;scrollbar-width:thin}.tab{flex:1 0 auto;min-width:120px}.menu{position:fixed;top:auto;right:14px;left:14px;bottom:18px;width:auto;max-height:70vh;overflow-y:auto}.modal-bg{padding:10px}.modal{max-height:92vh;overflow-y:auto;padding:17px}.own-profile,.own-name-edit{align-items:stretch;flex-direction:column}.meeting-main>.meeting-head,.meeting-main>.toolbar,.meeting-main>.tabs{display:none}.meeting-main{padding-top:10px}.mobile-menu-only{display:block!important}.mobile-section-label{display:block;margin:0 0 10px;padding:8px 10px;border-radius:10px;background:rgba(22,140,255,.1);color:#8fd6ff;font-size:12px;font-weight:900}.collapsed-meeting{display:none}}@keyframes mobileExpand{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:translateY(0)}}
       `}</style>
       <div className="container">
         <header className="header">
@@ -770,7 +717,6 @@ export default function Page() {
             <button className="btn" onClick={enableNotifications}>
               {notificationPermission === "granted" ? "Notifications On" : "Enable Notifications"}
             </button>
-            <button className="btn" onClick={downloadAllMeetingsExcel}>📊 Download Excel</button>
             <button className="btn" onClick={generateReport}>📝 Generate Report</button>
             <button className="btn primary" onClick={openCreateMeeting}>+ Create TBM</button>
           </div>
@@ -901,11 +847,27 @@ export default function Page() {
                   return (
                     <article className={`point ${point.status === "Completed" ? "completed" : ""}`} key={point.id}>
                       <div className="number">{index + 1}</div>
-                      <div><h3>{point.pinned ? "📌 " : ""}{point.text}</h3><div className="meta"><span>Added by <strong>{point.addedBy}</strong></span><span>{point.addedAt}</span>{activeTab === "action" && <><span className="chip">👤 {point.responsiblePerson || "Unassigned"}</span><span className={`chip ${due}`}>📅 {formatDate(point.dueDate || "")}</span><span className="chip">{point.status}</span></>}</div></div>
+                      <div>
+                        <h3>{point.pinned ? "📌 " : ""}{point.text}</h3>
+                        <div className="meta"><span>Added by <strong>{point.addedBy}</strong></span><span>{point.addedAt}</span>{activeTab === "action" && <><span className="chip">👤 {point.responsiblePerson || "Unassigned"}</span><span className={`chip ${due}`}>📅 {formatDate(point.dueDate || "")}</span><span className="chip">{point.status}</span></>}</div>
+                        {reactionPanelPointId === point.id && (() => {
+                          const reactedIds = new Set((point.reactions || []).map((reaction) => reaction.userId));
+                          const notReacted = teamProfiles.filter((profile) => !reactedIds.has(profile.id));
+                          return <div className="reaction-summary"><strong>Reacted</strong><span>{(point.reactions || []).length ? (point.reactions || []).map((reaction) => `${reaction.emoji} ${reaction.userName}`).join(", ") : "No reactions yet"}</span><strong style={{ marginTop: 9 }}>Not reacted</strong><span>{notReacted.length ? notReacted.map((profile) => profile.full_name?.trim() || profile.email?.split("@")[0] || "Team Member").join(", ") : "Everyone reacted"}</span></div>;
+                        })()}
+                      </div>
                       <div className="menu-wrap">
                         <button className="btn dots" onClick={() => { setOpenMeetingMenuId(null); setOpenPointMenuId((current) => current === point.id ? null : point.id); }}>⋮</button>
                         {openPointMenuId === point.id && (
                           <div className="menu">
+                            <div className="menu-reactions">
+                              {(["👍", "✅", "👏", "❤️", "👀"] as ReactionEmoji[]).map((emoji) => {
+                                const count = (point.reactions || []).filter((reaction) => reaction.emoji === emoji).length;
+                                const active = (point.reactions || []).some((reaction) => reaction.userId === currentUserId && reaction.emoji === emoji);
+                                return <button key={emoji} className={active ? "active" : ""} onClick={() => { reactToPoint(point.id, emoji); setOpenPointMenuId(null); }}>{emoji}{count > 0 ? ` ${count}` : ""}</button>;
+                              })}
+                            </div>
+                            <button onClick={() => { setReactionPanelPointId(reactionPanelPointId === point.id ? null : point.id); setOpenPointMenuId(null); }}>👥 Reacted / Not reacted</button>
                             <button onClick={() => { openEditPoint(point); setOpenPointMenuId(null); }}>✎ Edit point</button>
                             <button onClick={() => { mutatePoint(point.id, (item) => ({ ...item, pinned: !item.pinned })); setOpenPointMenuId(null); }}>{point.pinned ? "📌 Unpin point" : "📌 Pin point"}</button>
                             {activeTab === "action" && <button onClick={() => { mutatePoint(point.id, (item) => ({ ...item, status: item.status === "Completed" ? "Open" : "Completed" })); setOpenPointMenuId(null); }}>{point.status === "Completed" ? "↻ Reopen action" : "✓ Complete action"}</button>}
@@ -933,7 +895,7 @@ export default function Page() {
 
       {meetingModal && <div className="modal-bg" onMouseDown={(e) => e.target === e.currentTarget && setMeetingModal(false)}><div className="modal"><h2>{editMeetingId ? "Edit TBM" : "Create TBM"}</h2><label>Meeting title</label><input className="field" value={meetingName} onChange={(e) => setMeetingName(e.target.value)} placeholder="Optional title" /><label>Meeting date</label><input className="field" type="date" value={meetingDate} onChange={(e) => setMeetingDate(e.target.value)} /><div className="actions"><button className="btn" onClick={() => setMeetingModal(false)}>Cancel</button><button className="btn primary" onClick={saveMeeting}>Save</button></div></div></div>}
 
-      {pointModal && <div className="modal-bg" onMouseDown={(e) => e.target === e.currentTarget && setPointModal(false)}><div className="modal"><h2>{editingPointId ? "Edit" : "Add"} {activeTab === "action" ? "Action" : "Information"} Point</h2><label>Added by</label><input className="field" list="team-members" value={addedBy} onChange={(e) => setAddedBy(e.target.value)} /><datalist id="team-members">{teamMembers.map((name) => <option key={name} value={name} />)}</datalist><label>Point details</label><textarea className="field" rows={5} value={pointText} onChange={(e) => setPointText(e.target.value)} />{activeTab === "action" && <><label>Responsible person</label><input className="field" list="team-members" value={responsiblePerson} onChange={(e) => setResponsiblePerson(e.target.value)} /><label>Due date</label><input className="field" type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} /></>}<div className="actions"><button className="btn" onClick={() => setPointModal(false)}>Cancel</button><button className="btn primary" onClick={savePoint}>Save Point</button></div></div></div>}
+      {pointModal && <div className="modal-bg" onMouseDown={(e) => e.target === e.currentTarget && setPointModal(false)}><div className="modal"><h2>{editingPointId ? "Edit" : "Add"} {activeTab === "action" ? "Action" : "Information"} Point</h2><label>Added by</label><input className="field" value={currentUserName} readOnly disabled /><p className="muted">This is your signed-in profile name and cannot be changed here.</p><datalist id="team-members">{teamMembers.map((name) => <option key={name} value={name} />)}</datalist><label>Point details</label><textarea className="field" rows={5} value={pointText} onChange={(e) => setPointText(e.target.value)} />{activeTab === "action" && <><label>Responsible person</label><input className="field" list="team-members" value={responsiblePerson} onChange={(e) => setResponsiblePerson(e.target.value)} /><label>Due date</label><input className="field" type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} /></>}<div className="actions"><button className="btn" onClick={() => setPointModal(false)}>Cancel</button><button className="btn primary" onClick={savePoint}>Save Point</button></div></div></div>}
     </main>
   );
 }
