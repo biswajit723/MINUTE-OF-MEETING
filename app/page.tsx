@@ -5,7 +5,7 @@ import type { CSSProperties } from "react";
 import { createClient } from "@supabase/supabase-js";
 
 type PointStatus = "Open" | "Completed";
-type ActiveTab = "information" | "action" | "attendance";
+type ActiveTab = "information" | "decision" | "action" | "attendance";
 type UserRole = "owner" | "editor" | "viewer";
 type AttendanceStatus = "Present" | "Absent";
 type ReactionEmoji = "👍" | "✅" | "👏" | "❤️" | "👀";
@@ -28,6 +28,12 @@ type MeetingPoint = {
   reactions?: PointReaction[];
 };
 
+type MeetingAcknowledgement = {
+  userId: string;
+  userName: string;
+  acknowledgedAt: string;
+};
+
 type Attendance = {
   id: number;
   name: string;
@@ -43,6 +49,10 @@ type Meeting = {
   information: MeetingPoint[];
   action: MeetingPoint[];
   attendance: Attendance[];
+  decision: MeetingPoint[];
+  acknowledgements: MeetingAcknowledgement[];
+  closed?: boolean;
+  updatedAt?: string;
 };
 
 type UserPermissions = {
@@ -72,8 +82,12 @@ const initialMeetings: Meeting[] = [
     date: new Date().toISOString().slice(0, 10),
     pinned: false,
     information: [],
+    decision: [],
     action: [],
     attendance: [],
+    acknowledgements: [],
+    closed: false,
+    updatedAt: new Date().toISOString(),
   },
 ];
 
@@ -116,6 +130,10 @@ function normalizeMeetings(value: unknown): Meeting[] {
       reactions: point.reactions || [],
     })),
     attendance: meeting.attendance || [],
+    decision: (meeting.decision || []).map((point) => ({ ...point, reactions: point.reactions || [] })),
+    acknowledgements: meeting.acknowledgements || [],
+    closed: Boolean(meeting.closed),
+    updatedAt: meeting.updatedAt || new Date().toISOString(),
   }));
 }
 
@@ -155,6 +173,10 @@ export default function Page() {
   const [currentUserId, setCurrentUserId] = useState("");
   const [currentUserName, setCurrentUserName] = useState("");
   const [reactionPanelPointId, setReactionPanelPointId] = useState<number | null>(null);
+  const [hoveredPointId, setHoveredPointId] = useState<number | null>(null);
+  const [showReminderModal, setShowReminderModal] = useState(false);
+  const [changeSummary, setChangeSummary] = useState<string[]>([]);
+  const [agendaText, setAgendaText] = useState("");
   const [openMeetingMenuId, setOpenMeetingMenuId] = useState<number | null>(null);
   const [openPointMenuId, setOpenPointMenuId] = useState<number | null>(null);
   const [notificationPermission, setNotificationPermission] =
@@ -228,6 +250,18 @@ export default function Page() {
       }
 
       const incoming = normalizeMeetings(data?.data);
+      const loginKey = `mom-last-login-${user.id}`;
+      const previousLogin = window.localStorage.getItem(loginKey);
+      if (previousLogin) {
+        const since = new Date(previousLogin).getTime();
+        const changed = incoming.filter((meeting) => new Date(meeting.updatedAt || 0).getTime() > since);
+        setChangeSummary([
+          `${changed.length} TBM(s) changed`,
+          `${changed.reduce((total, meeting) => total + meeting.action.length, 0)} action(s) in changed TBMs`,
+          `${changed.reduce((total, meeting) => total + meeting.decision.length, 0)} decision(s) in changed TBMs`,
+        ]);
+      }
+      window.localStorage.setItem(loginKey, new Date().toISOString());
       skipNextSave.current = Boolean(data?.data);
       setMeetings(incoming);
       setSelectedMeetingId(incoming[0].id);
@@ -373,7 +407,9 @@ export default function Page() {
     const points =
       activeTab === "information"
         ? selectedMeeting.information
-        : selectedMeeting.action;
+        : activeTab === "decision"
+          ? selectedMeeting.decision
+          : selectedMeeting.action;
     const query = normalizeText(search);
     return [...points]
       .filter((point) => {
@@ -418,7 +454,7 @@ export default function Page() {
   function updateSelectedMeeting(updater: (meeting: Meeting) => Meeting) {
     setMeetings((current) =>
       current.map((meeting) =>
-        meeting.id === selectedMeetingId ? updater(meeting) : meeting
+        meeting.id === selectedMeetingId ? { ...updater(meeting), updatedAt: new Date().toISOString() } : meeting
       )
     );
   }
@@ -455,8 +491,12 @@ export default function Page() {
         name: meetingName.trim() || `TBM-${serial}`,
         date: meetingDate,
         information: [],
+        decision: [],
         action: [],
         attendance: [],
+        acknowledgements: [],
+        closed: false,
+        updatedAt: new Date().toISOString(),
       };
       setMeetings((current) => [...current, meeting]);
       setSelectedMeetingId(meeting.id);
@@ -496,7 +536,7 @@ export default function Page() {
     if (!pointText.trim() || !currentUserName.trim()) {
       return window.alert("Your login name and point details are required.");
     }
-    const key = activeTab === "action" ? "action" : "information";
+    const key = activeTab === "action" ? "action" : activeTab === "decision" ? "decision" : "information";
     updateSelectedMeeting((meeting) => {
       const list = meeting[key];
       if (editingPointId) {
@@ -537,7 +577,7 @@ export default function Page() {
   }
 
   function mutatePoint(id: number, updater: (point: MeetingPoint) => MeetingPoint) {
-    const key = activeTab === "action" ? "action" : "information";
+    const key = activeTab === "action" ? "action" : activeTab === "decision" ? "decision" : "information";
     updateSelectedMeeting((meeting) => ({
       ...meeting,
       [key]: meeting[key].map((point) => (point.id === id ? updater(point) : point)),
@@ -584,7 +624,7 @@ export default function Page() {
   function deletePoint(id: number) {
     if (!canDeletePoint) return window.alert("No permission to delete points.");
     if (!window.confirm("Delete this point permanently?")) return;
-    const key = activeTab === "action" ? "action" : "information";
+    const key = activeTab === "action" ? "action" : activeTab === "decision" ? "decision" : "information";
     updateSelectedMeeting((meeting) => ({
       ...meeting,
       [key]: meeting[key].filter((point) => point.id !== id),
@@ -644,6 +684,49 @@ export default function Page() {
     }));
   }
 
+  function acknowledgeMeeting(meetingId = selectedMeetingId) {
+    if (!currentUserId || !currentUserName) return;
+    setMeetings((current) => current.map((meeting) => {
+      if (meeting.id !== meetingId || meeting.acknowledgements.some((item) => item.userId === currentUserId)) return meeting;
+      return { ...meeting, updatedAt: new Date().toISOString(), acknowledgements: [...meeting.acknowledgements, { userId: currentUserId, userName: currentUserName, acknowledgedAt: new Date().toISOString() }] };
+    }));
+  }
+
+  function repeatedIssueCount(text: string, pointId: number) {
+    const target = normalizeText(text);
+    return meetings.flatMap((meeting) => [...meeting.information, ...meeting.decision, ...meeting.action])
+      .filter((point) => point.id !== pointId && normalizeText(point.text) === target).length;
+  }
+
+  function smartCloseMeeting(meetingId = selectedMeetingId) {
+    const meeting = meetings.find((item) => item.id === meetingId);
+    if (!meeting) return;
+    const warnings: string[] = [];
+    const noResponsible = meeting.action.filter((point) => !point.responsiblePerson?.trim()).length;
+    const noDueDate = meeting.action.filter((point) => !point.dueDate).length;
+    const noAcknowledgement = Math.max(0, teamProfiles.length - meeting.acknowledgements.length);
+    const overdue = meeting.action.filter((point) => dueState(point) === "overdue").length;
+    if (noResponsible) warnings.push(`${noResponsible} action(s) have no responsible person`);
+    if (noDueDate) warnings.push(`${noDueDate} action(s) have no due date`);
+    if (noAcknowledgement) warnings.push(`${noAcknowledgement} member(s) have not acknowledged`);
+    if (overdue) warnings.push(`${overdue} action(s) are overdue`);
+    if (warnings.length) {
+      window.alert(`TBM cannot be closed yet:\n\n${warnings.join("\n")}`);
+      return;
+    }
+    if (!window.confirm("Close and lock this TBM?")) return;
+    setMeetings((current) => current.map((item) => item.id === meetingId ? { ...item, closed: true, updatedAt: new Date().toISOString() } : item));
+  }
+
+  function generateNextAgenda(meetingId = selectedMeetingId) {
+    const meeting = meetings.find((item) => item.id === meetingId);
+    if (!meeting) return;
+    const items = meeting.action.filter((point) => point.status !== "Completed").map((point) => `Review open action: ${point.text}`);
+    meeting.action.filter((point) => repeatedIssueCount(point.text, point.id) > 0).forEach((point) => items.push(`Resolve repeated issue: ${point.text}`));
+    const unique = Array.from(new Set(items));
+    setAgendaText(unique.length ? unique.map((item, index) => `${index + 1}. ${item}`).join("\n") : "No pending agenda items.");
+  }
+
   async function enableNotifications() {
     if (typeof Notification === "undefined") {
       return window.alert("Notifications are not supported in this browser.");
@@ -659,13 +742,7 @@ export default function Page() {
   }
 
   function showReminder() {
-    const lines = [...overdueActions, ...dueSoonActions]
-      .slice(0, 8)
-      .map(
-        (point) =>
-          `${point.meetingName}: ${point.text} | ${point.responsiblePerson || "Unassigned"} | ${formatDate(point.dueDate || "")}`
-      );
-    window.alert(lines.length ? lines.join("\n\n") : "No overdue or upcoming actions.");
+    setShowReminderModal(true);
   }
 
   function generateReport() {
@@ -703,7 +780,7 @@ export default function Page() {
   return (
     <main className="page">
       <style jsx global>{`
-        *{box-sizing:border-box}html,body{margin:0;background:#06101d;color:#eef7ff;font-family:Inter,"Segoe UI",Arial,sans-serif}button,input,select,textarea{font:inherit}.page{min-height:100vh;padding:28px;background:radial-gradient(circle at 7% 3%,rgba(0,194,229,.22),transparent 27%),radial-gradient(circle at 95% 20%,rgba(113,76,235,.25),transparent 30%),#06101d}.container{max-width:1500px;margin:auto}.header{display:flex;justify-content:space-between;gap:18px;align-items:flex-start;margin-bottom:20px}.eyebrow{color:#5ee8fa;font-size:12px;font-weight:900;letter-spacing:2px}.title{font-size:clamp(38px,5vw,66px);margin:8px 0}.title span{color:#63a9ff}.muted{color:#91a6ba}.actions{display:flex;gap:9px;flex-wrap:wrap}.btn{padding:12px 16px;border:1px solid rgba(255,255,255,.13);border-radius:13px;background:rgba(255,255,255,.07);color:white;font-weight:800;cursor:pointer}.btn.primary{background:linear-gradient(135deg,#159cf0,#6870f4)}.btn.danger{color:#ff9da8}.menu-wrap{position:relative}.dots{width:38px;height:38px;padding:0;font-size:22px}.menu{position:absolute;z-index:50;top:43px;right:0;width:190px;padding:7px;border:1px solid rgba(255,255,255,.13);border-radius:14px;background:#102033;box-shadow:0 18px 45px rgba(0,0,0,.55)}.menu button{display:block;width:100%;padding:10px 11px;border:0;border-radius:9px;background:transparent;color:#e8f3fc;text-align:left;cursor:pointer}.menu button:hover{background:rgba(22,140,255,.17)}.menu button.danger{color:#ff9da8}.menu button.danger:hover{color:white;background:rgba(225,57,80,.7)}.mobile-menu-only{display:none!important}.mobile-section-label{display:none}.menu-reactions{display:grid;grid-template-columns:repeat(5,1fr);gap:5px;padding:5px}.menu-reactions button{padding:8px 4px;text-align:center;background:rgba(255,255,255,.055)}.menu-reactions button.active{background:rgba(22,140,255,.25);border:1px solid #38a9ff}.stats{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:12px;margin-bottom:18px}.stat{padding:17px;border:1px solid rgba(255,255,255,.1);border-radius:19px;background:rgba(255,255,255,.05)}.stat small{color:#8ca1b5;font-weight:800}.stat strong{display:block;margin-top:8px;font-size:25px}.layout{display:grid;grid-template-columns:330px minmax(0,1fr);gap:16px}.panel{border:1px solid rgba(255,255,255,.11);border-radius:23px;background:rgba(255,255,255,.05);padding:19px}.search{width:100%;padding:13px;color:white;background:#050d18;border:1px solid rgba(255,255,255,.12);border-radius:12px;outline:none}.history{display:flex;flex-direction:column;gap:9px;margin-top:12px}.history-card{display:flex;gap:8px;padding:13px;border:1px solid rgba(255,255,255,.08);border-radius:15px;background:rgba(255,255,255,.025)}.history-card.active{border-color:#329fff;background:rgba(22,140,255,.14)}.history-main{flex:1;background:none;border:0;color:white;text-align:left;cursor:pointer}.tiny{padding:7px 9px}.meeting-head{display:flex;justify-content:space-between;align-items:center;gap:12px}.toolbar{display:grid;grid-template-columns:2fr repeat(4,1fr);gap:8px;margin:18px 0}.tabs{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;padding:6px;background:#050b15;border-radius:17px;margin-bottom:17px}.tab{padding:13px;border:0;border-radius:12px;background:rgba(255,255,255,.04);color:#91a5b8;font-weight:900;cursor:pointer}.tab.active{color:white;background:#168cff}.point-list{display:flex;flex-direction:column;gap:11px}.point{display:grid;grid-template-columns:44px 1fr auto;gap:13px;padding:17px;background:rgba(4,15,26,.82);border:1px solid rgba(255,255,255,.09);border-radius:18px}.number{display:grid;place-items:center;width:44px;height:44px;border-radius:13px;background:rgba(16,193,222,.14);color:#5fe7f8;font-weight:900}.point h3{margin:0 0 9px;font-size:16px;line-height:1.5}.point.completed h3{text-decoration:line-through;color:#71869a}.meta{display:flex;gap:9px;flex-wrap:wrap;color:#8499ad;font-size:12px}.chip{padding:5px 8px;border-radius:999px;background:rgba(22,140,255,.12);color:#77c9ff}.chip.overdue{background:rgba(255,70,91,.14);color:#ff929f}.chip.today{background:rgba(255,181,71,.14);color:#ffc361}.chip.soon{background:rgba(177,118,255,.15);color:#c49bff}.reaction-area{display:flex;gap:7px;flex-wrap:wrap;margin-top:12px}.reaction-btn{padding:7px 10px;border:1px solid rgba(255,255,255,.11);border-radius:999px;background:rgba(255,255,255,.055);color:white;cursor:pointer}.reaction-btn.active{border-color:#38a9ff;background:rgba(22,140,255,.2)}.reaction-summary{margin-top:10px;padding:10px;border-radius:11px;background:rgba(255,255,255,.04);font-size:12px}.reaction-summary strong{display:block;margin-bottom:5px;color:#8fd6ff}.reaction-summary span{color:#a7b8c8}.attendance-form{display:flex;gap:8px;margin-bottom:14px}.attendance-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.attendance{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:13px;border:1px solid rgba(255,255,255,.09);border-radius:14px}.modal-bg{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:18px;background:rgba(1,5,10,.88)}.modal{width:100%;max-width:570px;padding:24px;border:1px solid rgba(255,255,255,.14);border-radius:22px;background:#0d1b2a}.modal h2{margin-top:0}.field{width:100%;padding:13px;margin:6px 0 13px;color:white;background:#050d18;border:1px solid rgba(255,255,255,.13);border-radius:12px}.empty{padding:55px;text-align:center;color:#8398ab;border:1px dashed rgba(255,255,255,.14);border-radius:17px}.empty-page{min-height:100vh;display:grid;place-items:center;background:#06101d;color:white}.empty-page button{padding:12px}.alert-bar{margin-bottom:14px;padding:13px;border:1px solid rgba(255,190,73,.25);border-radius:14px;background:rgba(255,190,73,.08);color:#ffd78b}.panel,.meeting-main,.point>div{min-width:0}.btn{max-width:100%;white-space:normal;overflow-wrap:anywhere}.history-main,.point h3,.meta{min-width:0;overflow-wrap:anywhere}.toolbar>*{min-width:0}.collapsed-meeting{display:grid;place-items:center;min-height:320px;padding:30px;text-align:center;border:1px dashed rgba(255,255,255,.16);border-radius:20px;color:#8fa5b8}.collapsed-meeting h2{margin:0 0 8px;color:#edf7ff}.menu{max-width:calc(100vw - 32px)}@media(max-width:1100px){.stats{grid-template-columns:repeat(3,1fr)}.layout{grid-template-columns:1fr}.toolbar{grid-template-columns:1fr 1fr}}@media(max-width:650px){.page{padding:10px;overflow-x:hidden}.container{width:100%;min-width:0}.header,.meeting-head{flex-direction:column;align-items:stretch}.header>.actions,.meeting-head>.actions{width:100%;display:grid;grid-template-columns:1fr 1fr}.header>.actions .btn,.meeting-head>.actions .btn{width:100%}.stats{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.stat{padding:12px;min-width:0}.stat strong{font-size:19px;overflow-wrap:anywhere}.layout{display:flex;flex-direction:column;gap:10px}.layout>aside.panel{display:contents}.layout>aside.panel>h2{order:1;margin:0 0 4px}.layout>aside.panel>.search{order:2}.layout>aside.panel>.history{display:contents}.history-card{order:var(--mobile-order);width:100%;margin-top:4px}.meeting-main{order:var(--mobile-order);width:100%;margin:0 0 8px;padding:12px;border-color:rgba(50,159,255,.45);animation:mobileExpand .18s ease-out}.panel{padding:12px;border-radius:16px}.toolbar{grid-template-columns:1fr}.attendance-list{grid-template-columns:1fr}.attendance,.attendance-form{align-items:stretch;flex-direction:column}.attendance .actions{display:grid;grid-template-columns:1fr auto}.point{grid-template-columns:36px minmax(0,1fr) auto;padding:12px;gap:8px}.number{width:36px;height:36px}.tabs{display:flex;overflow-x:auto;font-size:11px;scrollbar-width:thin}.tab{flex:1 0 auto;min-width:120px}.menu{position:fixed;top:auto;right:14px;left:14px;bottom:18px;width:auto;max-height:70vh;overflow-y:auto}.modal-bg{padding:10px}.modal{max-height:92vh;overflow-y:auto;padding:17px}.own-profile,.own-name-edit{align-items:stretch;flex-direction:column}.meeting-main>.meeting-head,.meeting-main>.toolbar,.meeting-main>.tabs{display:none}.meeting-main{padding-top:10px}.mobile-menu-only{display:block!important}.mobile-section-label{display:block;margin:0 0 10px;padding:8px 10px;border-radius:10px;background:rgba(22,140,255,.1);color:#8fd6ff;font-size:12px;font-weight:900}.collapsed-meeting{display:none}}@keyframes mobileExpand{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:translateY(0)}}
+        *{box-sizing:border-box}html,body{margin:0;background:#06101d;color:#eef7ff;font-family:Inter,"Segoe UI",Arial,sans-serif}button,input,select,textarea{font:inherit}.page{min-height:100vh;padding:28px;background:radial-gradient(circle at 7% 3%,rgba(0,194,229,.22),transparent 27%),radial-gradient(circle at 95% 20%,rgba(113,76,235,.25),transparent 30%),#06101d}.container{max-width:1500px;margin:auto}.header{display:flex;justify-content:space-between;gap:18px;align-items:flex-start;margin-bottom:20px}.eyebrow{color:#5ee8fa;font-size:12px;font-weight:900;letter-spacing:2px}.title{font-size:clamp(38px,5vw,66px);margin:8px 0}.title span{color:#63a9ff}.muted{color:#91a6ba}.actions{display:flex;gap:9px;flex-wrap:wrap}.btn{padding:12px 16px;border:1px solid rgba(255,255,255,.13);border-radius:13px;background:rgba(255,255,255,.07);color:white;font-weight:800;cursor:pointer}.btn.primary{background:linear-gradient(135deg,#159cf0,#6870f4)}.btn.danger{color:#ff9da8}.menu-wrap{position:relative}.dots{width:38px;height:38px;padding:0;font-size:22px}.menu{position:absolute;z-index:50;top:43px;right:0;width:190px;padding:7px;border:1px solid rgba(255,255,255,.13);border-radius:14px;background:#102033;box-shadow:0 18px 45px rgba(0,0,0,.55)}.menu button{display:block;width:100%;padding:10px 11px;border:0;border-radius:9px;background:transparent;color:#e8f3fc;text-align:left;cursor:pointer}.menu button:hover{background:rgba(22,140,255,.17)}.menu button.danger{color:#ff9da8}.menu button.danger:hover{color:white;background:rgba(225,57,80,.7)}.mobile-menu-only{display:none!important}.mobile-section-label{display:none}.menu-reactions{display:grid;grid-template-columns:repeat(5,1fr);gap:5px;padding:5px}.menu-reactions button{padding:8px 4px;text-align:center;background:rgba(255,255,255,.055)}.menu-reactions button.active{background:rgba(22,140,255,.25);border:1px solid #38a9ff}.floating-reactions{position:absolute;z-index:200;left:72px;top:-30px;display:flex;gap:6px;padding:7px;border:1px solid rgba(255,255,255,.14);border-radius:15px;background:rgba(16,32,51,.97);box-shadow:0 16px 38px rgba(0,0,0,.5);opacity:0;visibility:hidden;transform:translateY(8px) scale(.96);transition:opacity .16s ease,transform .16s ease,visibility .16s ease}.point:hover .floating-reactions,.point.reaction-open .floating-reactions{opacity:1;visibility:visible;transform:translateY(0) scale(1)}.floating-reactions button{display:grid;place-items:center;min-width:38px;height:38px;padding:0 8px;border:1px solid transparent;border-radius:11px;background:transparent;color:white;font-size:20px;cursor:pointer;transition:background .14s ease,transform .14s ease}.floating-reactions button:hover,.floating-reactions button.active{background:rgba(22,140,255,.23);border-color:rgba(83,189,255,.45);transform:translateY(-2px)}.reminder-modal{max-width:650px;background:linear-gradient(165deg,#13263a,#0a1624);box-shadow:0 30px 80px rgba(0,0,0,.62);animation:modalIn .18s ease-out}.reminder-head{display:flex;justify-content:space-between;gap:14px;align-items:flex-start;margin-bottom:14px}.reminder-head h2{margin:0}.reminder-close{width:40px;height:40px;padding:0;border-radius:12px}.reminder-summary{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-bottom:14px}.reminder-count{padding:13px;border-radius:13px;background:rgba(255,255,255,.055)}.reminder-count strong{display:block;font-size:24px}.reminder-list{display:flex;flex-direction:column;gap:9px;max-height:52vh;overflow-y:auto}.reminder-item{padding:13px;border:1px solid rgba(255,255,255,.09);border-radius:14px;background:rgba(3,12,22,.55)}.reminder-item.overdue{border-color:rgba(255,88,107,.3)}.reminder-item.soon{border-color:rgba(255,190,73,.28)}.reminder-item h3{margin:0 0 7px;font-size:15px}.reminder-item p{margin:0;color:#91a6ba;font-size:12px}.reminder-empty{padding:30px;text-align:center;color:#91a6ba}@keyframes modalIn{from{opacity:0;transform:translateY(12px) scale(.98)}to{opacity:1;transform:translateY(0) scale(1)}}.stats{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:12px;margin-bottom:18px}.stat{padding:17px;border:1px solid rgba(255,255,255,.1);border-radius:19px;background:rgba(255,255,255,.05)}.stat small{color:#8ca1b5;font-weight:800}.stat strong{display:block;margin-top:8px;font-size:25px}.layout{display:grid;grid-template-columns:330px minmax(0,1fr);gap:16px}.panel{border:1px solid rgba(255,255,255,.11);border-radius:23px;background:rgba(255,255,255,.05);padding:19px}.search{width:100%;padding:13px;color:white;background:#050d18;border:1px solid rgba(255,255,255,.12);border-radius:12px;outline:none}.history{display:flex;flex-direction:column;gap:9px;margin-top:12px}.history-card{display:flex;gap:8px;padding:13px;border:1px solid rgba(255,255,255,.08);border-radius:15px;background:rgba(255,255,255,.025)}.history-card.active{border-color:#329fff;background:rgba(22,140,255,.14)}.history-main{flex:1;background:none;border:0;color:white;text-align:left;cursor:pointer}.tiny{padding:7px 9px}.meeting-head{display:flex;justify-content:space-between;align-items:center;gap:12px}.toolbar{display:grid;grid-template-columns:2fr repeat(4,1fr);gap:8px;margin:18px 0}.tabs{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;padding:6px;background:#050b15;border-radius:17px;margin-bottom:17px}.tab{padding:13px;border:0;border-radius:12px;background:rgba(255,255,255,.04);color:#91a5b8;font-weight:900;cursor:pointer}.tab.active{color:white;background:#168cff}.point-list{display:flex;flex-direction:column;gap:11px}.point{position:relative;overflow:visible;display:grid;grid-template-columns:44px 1fr auto;gap:13px;padding:17px;background:rgba(4,15,26,.82);border:1px solid rgba(255,255,255,.09);border-radius:18px}.number{display:grid;place-items:center;width:44px;height:44px;border-radius:13px;background:rgba(16,193,222,.14);color:#5fe7f8;font-weight:900}.point h3{margin:0 0 9px;font-size:16px;line-height:1.5}.point.completed h3{text-decoration:line-through;color:#71869a}.meta{display:flex;gap:9px;flex-wrap:wrap;color:#8499ad;font-size:12px}.chip{padding:5px 8px;border-radius:999px;background:rgba(22,140,255,.12);color:#77c9ff}.chip.overdue{background:rgba(255,70,91,.14);color:#ff929f}.chip.today{background:rgba(255,181,71,.14);color:#ffc361}.chip.soon{background:rgba(177,118,255,.15);color:#c49bff}.reaction-area{display:flex;gap:7px;flex-wrap:wrap;margin-top:12px}.reaction-btn{padding:7px 10px;border:1px solid rgba(255,255,255,.11);border-radius:999px;background:rgba(255,255,255,.055);color:white;cursor:pointer}.reaction-btn.active{border-color:#38a9ff;background:rgba(22,140,255,.2)}.reaction-summary{margin-top:10px;padding:10px;border-radius:11px;background:rgba(255,255,255,.04);font-size:12px}.reaction-summary strong{display:block;margin-bottom:5px;color:#8fd6ff}.reaction-summary span{color:#a7b8c8}.attendance-form{display:flex;gap:8px;margin-bottom:14px}.attendance-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.attendance{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:13px;border:1px solid rgba(255,255,255,.09);border-radius:14px}.modal-bg{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:18px;background:rgba(1,5,10,.88)}.modal{width:100%;max-width:570px;padding:24px;border:1px solid rgba(255,255,255,.14);border-radius:22px;background:#0d1b2a}.modal h2{margin-top:0}.field{width:100%;padding:13px;margin:6px 0 13px;color:white;background:#050d18;border:1px solid rgba(255,255,255,.13);border-radius:12px}.empty{padding:55px;text-align:center;color:#8398ab;border:1px dashed rgba(255,255,255,.14);border-radius:17px}.empty-page{min-height:100vh;display:grid;place-items:center;background:#06101d;color:white}.empty-page button{padding:12px}.alert-bar{margin-bottom:14px;padding:13px;border:1px solid rgba(255,190,73,.25);border-radius:14px;background:rgba(255,190,73,.08);color:#ffd78b}.change-card{margin-bottom:14px;padding:14px;border:1px solid rgba(104,112,244,.28);border-radius:14px;background:rgba(104,112,244,.1)}.repeat-warning{margin-top:7px;color:#ffc361;font-size:12px}.closed-badge{color:#66e8ab;font-size:11px}.panel,.meeting-main,.point>div{min-width:0}.btn{max-width:100%;white-space:normal;overflow-wrap:anywhere}.history-main,.point h3,.meta{min-width:0;overflow-wrap:anywhere}.toolbar>*{min-width:0}.collapsed-meeting{display:grid;place-items:center;min-height:320px;padding:30px;text-align:center;border:1px dashed rgba(255,255,255,.16);border-radius:20px;color:#8fa5b8}.collapsed-meeting h2{margin:0 0 8px;color:#edf7ff}.menu{max-width:calc(100vw - 32px)}@media(max-width:1100px){.stats{grid-template-columns:repeat(3,1fr)}.layout{grid-template-columns:1fr}.toolbar{grid-template-columns:1fr 1fr}}@media(max-width:650px){.page{padding:10px;overflow-x:hidden}.container{width:100%;min-width:0}.header,.meeting-head{flex-direction:column;align-items:stretch}.header>.actions,.meeting-head>.actions{width:100%;display:grid;grid-template-columns:1fr 1fr}.header>.actions .btn,.meeting-head>.actions .btn{width:100%}.stats{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.stat{padding:12px;min-width:0}.stat strong{font-size:19px;overflow-wrap:anywhere}.layout{display:flex;flex-direction:column;gap:10px}.layout>aside.panel{display:contents}.layout>aside.panel>h2{order:1;margin:0 0 4px}.layout>aside.panel>.search{order:2}.layout>aside.panel>.history{display:contents}.history-card{order:var(--mobile-order);width:100%;margin-top:4px}.meeting-main{order:var(--mobile-order);width:100%;margin:0 0 8px;padding:12px;border-color:rgba(50,159,255,.45);animation:mobileExpand .18s ease-out}.panel{padding:12px;border-radius:16px}.toolbar{grid-template-columns:1fr}.attendance-list{grid-template-columns:1fr}.attendance,.attendance-form{align-items:stretch;flex-direction:column}.attendance .actions{display:grid;grid-template-columns:1fr auto}.point{grid-template-columns:36px minmax(0,1fr) auto;padding:12px;gap:8px}.number{width:36px;height:36px}.tabs{display:flex;overflow-x:auto;font-size:11px;scrollbar-width:thin}.tab{flex:1 0 auto;min-width:120px}.menu{position:fixed;top:auto;right:14px;left:14px;bottom:18px;width:auto;max-height:70vh;overflow-y:auto}.modal-bg{padding:10px}.modal{max-height:92vh;overflow-y:auto;padding:17px}.own-profile,.own-name-edit{align-items:stretch;flex-direction:column}.meeting-main>.meeting-head,.meeting-main>.toolbar,.meeting-main>.tabs{display:none}.meeting-main{padding-top:10px}.mobile-menu-only{display:block!important}.mobile-section-label{display:block;margin:0 0 10px;padding:8px 10px;border-radius:10px;background:rgba(22,140,255,.1);color:#8fd6ff;font-size:12px;font-weight:900}.floating-reactions{position:absolute;left:44px;right:auto;top:-22px;max-width:calc(100vw - 92px);overflow-x:auto}.point:hover .floating-reactions{opacity:0;visibility:hidden;transform:translateY(8px) scale(.96)}.point.reaction-open .floating-reactions{opacity:1;visibility:visible;transform:translateY(0) scale(1)}.collapsed-meeting{display:none}}@keyframes mobileExpand{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:translateY(0)}}
       `}</style>
       <div className="container">
         <header className="header">
@@ -727,6 +804,7 @@ export default function Page() {
             ⚠ {overdueActions.length} overdue action(s), {dueSoonActions.length} due today/soon.
           </div>
         )}
+        {changeSummary.length > 0 && <div className="change-card"><strong>What changed since your last login</strong>{changeSummary.map((item) => <div key={item}>{item}</div>)}</div>}
 
         <section className="stats">
           <div className="stat"><small>TBMS</small><strong>{meetings.length}</strong></div>
@@ -767,11 +845,17 @@ export default function Page() {
                     {openMeetingMenuId === meeting.id && (
                       <div className="menu">
                         <button className="mobile-menu-only" onClick={() => { setSelectedMeetingId(meeting.id); setExpandedMeetingId(meeting.id); setActiveTab("information"); setOpenMeetingMenuId(null); window.setTimeout(openNewPoint, 0); }}>＋ Add Information Point</button>
+                        <button className="mobile-menu-only" onClick={() => { setSelectedMeetingId(meeting.id); setExpandedMeetingId(meeting.id); setActiveTab("decision"); setOpenMeetingMenuId(null); window.setTimeout(openNewPoint, 0); }}>＋ Add Decision Point</button>
                         <button className="mobile-menu-only" onClick={() => { setSelectedMeetingId(meeting.id); setExpandedMeetingId(meeting.id); setActiveTab("action"); setOpenMeetingMenuId(null); window.setTimeout(openNewPoint, 0); }}>＋ Add Action Point</button>
                         <button className="mobile-menu-only" onClick={() => { setSelectedMeetingId(meeting.id); setExpandedMeetingId(meeting.id); setActiveTab("information"); setOpenMeetingMenuId(null); }}>ℹ Information Points</button>
+                        <button className="mobile-menu-only" onClick={() => { setSelectedMeetingId(meeting.id); setExpandedMeetingId(meeting.id); setActiveTab("decision"); setOpenMeetingMenuId(null); }}>◆ Decision Points</button>
                         <button className="mobile-menu-only" onClick={() => { setSelectedMeetingId(meeting.id); setExpandedMeetingId(meeting.id); setActiveTab("action"); setOpenMeetingMenuId(null); }}>✓ Action Points</button>
                         <button className="mobile-menu-only" onClick={() => { setSelectedMeetingId(meeting.id); setExpandedMeetingId(meeting.id); setActiveTab("attendance"); setOpenMeetingMenuId(null); }}>👥 Attendance</button>
-                        <button className="mobile-menu-only" onClick={() => { setSelectedMeetingId(meeting.id); setExpandedMeetingId(meeting.id); setOpenMeetingMenuId(null); window.setTimeout(generateReport, 0); }}>📝 Generate Report</button>
+                        <button onClick={() => { setSelectedMeetingId(meeting.id); setExpandedMeetingId(meeting.id); setActiveTab("decision"); setOpenMeetingMenuId(null); }}>◆ Decision Points</button>
+                        <button onClick={() => { acknowledgeMeeting(meeting.id); setOpenMeetingMenuId(null); }}>✓ Acknowledge TBM</button>
+                        <button onClick={() => { generateNextAgenda(meeting.id); setOpenMeetingMenuId(null); }}>☷ Next Meeting Agenda</button>
+                        {!meeting.closed && <button onClick={() => { smartCloseMeeting(meeting.id); setOpenMeetingMenuId(null); }}>🔒 Smart Close TBM</button>}
+                        {meeting.closed && <button onClick={() => { setMeetings((current) => current.map((item) => item.id === meeting.id ? { ...item, closed: false, updatedAt: new Date().toISOString() } : item)); setOpenMeetingMenuId(null); }}>↻ Reopen TBM</button>}
                         <button onClick={() => { openEditMeeting(meeting); setOpenMeetingMenuId(null); }}>✎ Edit meeting</button>
                         <button onClick={() => { setMeetings((current) => current.map((item) => item.id === meeting.id ? { ...item, pinned: !item.pinned } : item)); setOpenMeetingMenuId(null); }}>{meeting.pinned ? "📌 Unpin meeting" : "📌 Pin meeting"}</button>
                         {canDeleteMeeting && <button className="danger" onClick={() => { deleteMeeting(meeting.id); setOpenMeetingMenuId(null); }}>🗑 Delete meeting</button>}
@@ -816,18 +900,12 @@ export default function Page() {
             </div>
 
             <div className="tabs">
-              {(["information", "action", "attendance"] as ActiveTab[]).map((tab) => (
-                <button key={tab} className={`tab ${activeTab === tab ? "active" : ""}`} onClick={() => setActiveTab(tab)}>{tab.toUpperCase()} ({tab === "information" ? selectedMeeting.information.length : tab === "action" ? selectedMeeting.action.length : selectedMeeting.attendance.length})</button>
+              {(["information", "decision", "action", "attendance"] as ActiveTab[]).map((tab) => (
+                <button key={tab} className={`tab ${activeTab === tab ? "active" : ""}`} onClick={() => setActiveTab(tab)}>{tab.toUpperCase()} ({tab === "information" ? selectedMeeting.information.length : tab === "decision" ? selectedMeeting.decision.length : tab === "action" ? selectedMeeting.action.length : selectedMeeting.attendance.length})</button>
               ))}
             </div>
 
-            <div className="mobile-section-label">
-              {activeTab === "information"
-                ? `Information Points (${selectedMeeting.information.length})`
-                : activeTab === "action"
-                  ? `Action Points (${selectedMeeting.action.length})`
-                  : `Attendance (${selectedMeeting.attendance.length})`}
-            </div>
+            <div className="mobile-section-label">{activeTab === "information" ? `Information Points (${selectedMeeting.information.length})` : activeTab === "decision" ? `Decision Points (${selectedMeeting.decision.length})` : activeTab === "action" ? `Action Points (${selectedMeeting.action.length})` : `Attendance (${selectedMeeting.attendance.length})`}</div>
 
             {activeTab === "attendance" ? (
               <div>
@@ -845,10 +923,36 @@ export default function Page() {
                 {displayedPoints.map((point, index) => {
                   const due = dueState(point);
                   return (
-                    <article className={`point ${point.status === "Completed" ? "completed" : ""}`} key={point.id}>
+                    <article
+                      className={`point ${point.status === "Completed" ? "completed" : ""} ${hoveredPointId === point.id ? "reaction-open" : ""}`}
+                      key={point.id}
+                      onMouseEnter={() => setHoveredPointId(point.id)}
+                      onMouseLeave={() => setHoveredPointId(null)}
+                      onTouchStart={(event) => {
+                        const target = event.target as HTMLElement;
+                        if (target.closest("button, select, input, textarea")) return;
+                        setHoveredPointId((current) => current === point.id ? null : point.id);
+                      }}
+                    >
+                      <div className="floating-reactions" onClick={(event) => event.stopPropagation()}>
+                        {(["👍", "✅", "👏", "❤️", "👀"] as ReactionEmoji[]).map((emoji) => {
+                          const count = (point.reactions || []).filter((reaction) => reaction.emoji === emoji).length;
+                          const active = (point.reactions || []).some((reaction) => reaction.userId === currentUserId && reaction.emoji === emoji);
+                          return (
+                            <button
+                              key={emoji}
+                              className={active ? "active" : ""}
+                              title={emoji}
+                              onClick={() => reactToPoint(point.id, emoji)}
+                            >
+                              {emoji}{count > 0 ? <small>{count}</small> : null}
+                            </button>
+                          );
+                        })}
+                      </div>
                       <div className="number">{index + 1}</div>
                       <div>
-                        <h3>{point.pinned ? "📌 " : ""}{point.text}</h3>
+                        <h3>{point.pinned ? "📌 " : ""}{point.text}</h3>{repeatedIssueCount(point.text, point.id) > 0 && <div className="repeat-warning">⚠ Repeated in {repeatedIssueCount(point.text, point.id)} other point(s)</div>}
                         <div className="meta"><span>Added by <strong>{point.addedBy}</strong></span><span>{point.addedAt}</span>{activeTab === "action" && <><span className="chip">👤 {point.responsiblePerson || "Unassigned"}</span><span className={`chip ${due}`}>📅 {formatDate(point.dueDate || "")}</span><span className="chip">{point.status}</span></>}</div>
                         {reactionPanelPointId === point.id && (() => {
                           const reactedIds = new Set((point.reactions || []).map((reaction) => reaction.userId));
@@ -860,13 +964,7 @@ export default function Page() {
                         <button className="btn dots" onClick={() => { setOpenMeetingMenuId(null); setOpenPointMenuId((current) => current === point.id ? null : point.id); }}>⋮</button>
                         {openPointMenuId === point.id && (
                           <div className="menu">
-                            <div className="menu-reactions">
-                              {(["👍", "✅", "👏", "❤️", "👀"] as ReactionEmoji[]).map((emoji) => {
-                                const count = (point.reactions || []).filter((reaction) => reaction.emoji === emoji).length;
-                                const active = (point.reactions || []).some((reaction) => reaction.userId === currentUserId && reaction.emoji === emoji);
-                                return <button key={emoji} className={active ? "active" : ""} onClick={() => { reactToPoint(point.id, emoji); setOpenPointMenuId(null); }}>{emoji}{count > 0 ? ` ${count}` : ""}</button>;
-                              })}
-                            </div>
+                            <div className="menu-reactions">{(["👍", "✅", "👏", "❤️", "👀"] as ReactionEmoji[]).map((emoji) => { const count = (point.reactions || []).filter((reaction) => reaction.emoji === emoji).length; const active = (point.reactions || []).some((reaction) => reaction.userId === currentUserId && reaction.emoji === emoji); return <button key={emoji} className={active ? "active" : ""} onClick={() => { reactToPoint(point.id, emoji); setOpenPointMenuId(null); }}>{emoji}{count > 0 ? ` ${count}` : ""}</button>; })}</div>
                             <button onClick={() => { setReactionPanelPointId(reactionPanelPointId === point.id ? null : point.id); setOpenPointMenuId(null); }}>👥 Reacted / Not reacted</button>
                             <button onClick={() => { openEditPoint(point); setOpenPointMenuId(null); }}>✎ Edit point</button>
                             <button onClick={() => { mutatePoint(point.id, (item) => ({ ...item, pinned: !item.pinned })); setOpenPointMenuId(null); }}>{point.pinned ? "📌 Unpin point" : "📌 Pin point"}</button>
@@ -895,7 +993,47 @@ export default function Page() {
 
       {meetingModal && <div className="modal-bg" onMouseDown={(e) => e.target === e.currentTarget && setMeetingModal(false)}><div className="modal"><h2>{editMeetingId ? "Edit TBM" : "Create TBM"}</h2><label>Meeting title</label><input className="field" value={meetingName} onChange={(e) => setMeetingName(e.target.value)} placeholder="Optional title" /><label>Meeting date</label><input className="field" type="date" value={meetingDate} onChange={(e) => setMeetingDate(e.target.value)} /><div className="actions"><button className="btn" onClick={() => setMeetingModal(false)}>Cancel</button><button className="btn primary" onClick={saveMeeting}>Save</button></div></div></div>}
 
-      {pointModal && <div className="modal-bg" onMouseDown={(e) => e.target === e.currentTarget && setPointModal(false)}><div className="modal"><h2>{editingPointId ? "Edit" : "Add"} {activeTab === "action" ? "Action" : "Information"} Point</h2><label>Added by</label><input className="field" value={currentUserName} readOnly disabled /><p className="muted">This is your signed-in profile name and cannot be changed here.</p><datalist id="team-members">{teamMembers.map((name) => <option key={name} value={name} />)}</datalist><label>Point details</label><textarea className="field" rows={5} value={pointText} onChange={(e) => setPointText(e.target.value)} />{activeTab === "action" && <><label>Responsible person</label><input className="field" list="team-members" value={responsiblePerson} onChange={(e) => setResponsiblePerson(e.target.value)} /><label>Due date</label><input className="field" type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} /></>}<div className="actions"><button className="btn" onClick={() => setPointModal(false)}>Cancel</button><button className="btn primary" onClick={savePoint}>Save Point</button></div></div></div>}
+      {pointModal && <div className="modal-bg" onMouseDown={(e) => e.target === e.currentTarget && setPointModal(false)}><div className="modal"><h2>{editingPointId ? "Edit" : "Add"} {activeTab === "action" ? "Action" : activeTab === "decision" ? "Decision" : "Information"} Point</h2><label>Added by</label><input className="field" value={currentUserName} readOnly disabled /><p className="muted">This is your signed-in profile name and cannot be changed here.</p><datalist id="team-members">{teamMembers.map((name) => <option key={name} value={name} />)}</datalist><label>Point details</label><textarea className="field" rows={5} value={pointText} onChange={(e) => setPointText(e.target.value)} />{activeTab === "action" && <><label>Responsible person</label><input className="field" list="team-members" value={responsiblePerson} onChange={(e) => setResponsiblePerson(e.target.value)} /><label>Due date</label><input className="field" type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} /></>}<div className="actions"><button className="btn" onClick={() => setPointModal(false)}>Cancel</button><button className="btn primary" onClick={savePoint}>Save Point</button></div></div></div>}
+      {agendaText && <div className="modal-bg" onMouseDown={(event) => event.target === event.currentTarget && setAgendaText("")}><div className="modal"><h2>Suggested Next Meeting Agenda</h2><textarea className="field" rows={12} value={agendaText} onChange={(event) => setAgendaText(event.target.value)} /><div className="actions"><button className="btn" onClick={() => setAgendaText("")}>Close</button><button className="btn primary" onClick={() => navigator.clipboard.writeText(agendaText)}>Copy Agenda</button></div></div></div>}
+
+      {showReminderModal && (
+        <div
+          className="modal-bg"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setShowReminderModal(false);
+          }}
+        >
+          <div className="modal reminder-modal">
+            <div className="reminder-head">
+              <div>
+                <div className="eyebrow">ACTION REMINDERS</div>
+                <h2>Attention needed</h2>
+                <p className="muted">Overdue and upcoming actions from all TBMs.</p>
+              </div>
+              <button className="btn reminder-close" onClick={() => setShowReminderModal(false)}>×</button>
+            </div>
+            <div className="reminder-summary">
+              <div className="reminder-count"><small>OVERDUE</small><strong>{overdueActions.length}</strong></div>
+              <div className="reminder-count"><small>DUE SOON</small><strong>{dueSoonActions.length}</strong></div>
+            </div>
+            <div className="reminder-list">
+              {[...overdueActions, ...dueSoonActions].length === 0 ? (
+                <div className="reminder-empty">No overdue or upcoming actions.</div>
+              ) : (
+                [...overdueActions, ...dueSoonActions].slice(0, 20).map((point) => {
+                  const state = dueState(point);
+                  return (
+                    <div className={`reminder-item ${state === "overdue" ? "overdue" : "soon"}`} key={`${point.meetingName}-${point.id}`}>
+                      <h3>{point.text}</h3>
+                      <p>{point.meetingName} · {point.responsiblePerson || "Unassigned"} · {formatDate(point.dueDate || "")}</p>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 }
